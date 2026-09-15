@@ -10,12 +10,12 @@
 
 ```bash
 codex plugin marketplace add HaidongPang/dingtalk-workspace-cli --ref main
-codex plugin add dingtalk-workspace-cli@haidong-dws
+codex plugin add dws@haidong-dws
 codex plugin list --marketplace haidong-dws --json
 ```
 
 安装后新建 Codex 任务，直接描述钉钉需求。插件使用
-`dingtalk-workspace-cli:` 命名空间，当前包含 14 个产品及共享 skills。
+`dws:` 命名空间，当前包含 14 个产品及共享 skills。
 
 若已安装独立的 `dingtalk-*` 或 mono `dws` skill，应在核对来源并备份后
 停用旧副本，避免重复发现。此插件不会自动修改或删除旧 skills；
@@ -43,7 +43,7 @@ codex plugin list --marketplace haidong-dws --json
 
 ```bash
 codex plugin marketplace upgrade haidong-dws
-codex plugin add dingtalk-workspace-cli@haidong-dws
+codex plugin add dws@haidong-dws
 ```
 
 新版本应验证 Codex 实际发现的 skills 与 `skills/multi/*/SKILL.md` 完全一致，
@@ -51,3 +51,17 @@ codex plugin add dingtalk-workspace-cli@haidong-dws
 
 初始版本已在 Codex Desktop `0.154.0-alpha.6.2` 的隔离配置中完成安装和
 skill 发现检查。这里只验证插件加载，不代表已对钉钉线上业务操作做回归测试。
+
+## 从旧插件名称迁移
+
+旧标识 `dingtalk-workspace-cli@haidong-dws` 已更名为 `dws@haidong-dws`。
+更新 marketplace 后安装新插件，再卸载旧插件，避免两个命名空间同时加载：
+
+```bash
+codex plugin marketplace upgrade haidong-dws
+codex plugin add dws@haidong-dws
+codex plugin remove dingtalk-workspace-cli@haidong-dws
+```
+
+显示名称为 **DWS**。图标取自钉钉 macOS 应用的 `AppIcon.icns`，
+转换为 PNG；钉钉标识权利归其权利人所有，不表示本社区插件获得官方背书。

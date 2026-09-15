@@ -1,11 +1,11 @@
 {
   "name": "haidong-dws",
   "interface": {
-    "displayName": "Haidong DWS"
+    "displayName": "DWS"
   },
   "plugins": [
     {
-      "name": "dingtalk-workspace-cli",
+      "name": "dws",
       "source": {
         "source": "local",
         "path": "."
