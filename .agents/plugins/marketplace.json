@@ -1,0 +1,20 @@
+{
+  "name": "haidong-dws",
+  "interface": {
+    "displayName": "Haidong DWS"
+  },
+  "plugins": [
+    {
+      "name": "dingtalk-workspace-cli",
+      "source": {
+        "source": "local",
+        "path": "."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

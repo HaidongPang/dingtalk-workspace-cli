@@ -1,0 +1,20 @@
+{
+  "name": "dingtalk-workspace-cli",
+  "version": "0.1.0",
+  "description": "DingTalk Workspace multi skills for Codex, powered by the local dws CLI.",
+  "author": {
+    "name": "HaidongPang"
+  },
+  "repository": "https://github.com/HaidongPang/dingtalk-workspace-cli",
+  "license": "Apache-2.0",
+  "skills": "./skills/multi/",
+  "interface": {
+    "displayName": "DWS (DingTalk Workspace)",
+    "shortDescription": "Use DingTalk through the official multi skills",
+    "longDescription": "Community packaging of the upstream DingTalk Workspace product skills, scripts and references. Requires an installed and authenticated dws CLI.",
+    "developerName": "HaidongPang",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": ["总结我今天的钉钉消息", "查看我本周的日程", "查找项目相关的钉钉文档"]
+  }
+}

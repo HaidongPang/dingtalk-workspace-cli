@@ -2,6 +2,8 @@
 
 <p align="center"><code>dws</code> — 钉钉工作台命令行工具，为人类和 AI Agent 而生。</p>
 
+本 fork 提供 [Codex 插件安装方式](docs/codex-plugin.md)，直接加载上游 multi skills。
+
 <p align="center">
   <img src="https://img.alicdn.com/imgextra/i1/O1CN01oKAc2r28jOyyspcQt_!!6000000007968-2-tps-4096-1701.png" alt="DWS Product Overview" width="100%">
 </p>
