@@ -9,7 +9,7 @@
 版本兼容的 `dws` CLI。插件本身不安装 CLI、不登录账号，也不启动 MCP 服务。
 
 ```bash
-codex plugin marketplace add HaidongPang/dingtalk-workspace-cli --ref codex/dws-multi-plugin
+codex plugin marketplace add HaidongPang/dingtalk-workspace-cli --ref main
 codex plugin add dingtalk-workspace-cli@haidong-dws
 codex plugin list --marketplace haidong-dws --json
 ```
@@ -38,7 +38,7 @@ codex plugin list --marketplace haidong-dws --json
 
 ## 更新与验证
 
-维护者在 `codex/dws-multi-plugin` 分支合并上游更新，核对 multi 与 CLI
+维护者在 `main` 分支合并上游更新，核对 multi 与 CLI
 兼容性，并更新插件版本。用户随后刷新 marketplace 并重新安装：
 
 ```bash
