@@ -23,6 +23,13 @@ package cli
 // that must not deliver a direct interface property (provenance
 // reviewed_mapping_exclusion). Edit only with an exact reviewed reason.
 var reviewedSchemaParameterMappingExclusions = map[string]string{
+	"dingtalk-tag.create_mcp --config-file":                              "Local JSON file expands into create_mcp root fields name, configString and optional MCP settings; neither configFile nor config is a direct RPC property.",
+	"aitable.table_create --wait":                                        "Local read-back capability; never sent to create_table.",
+	"aitable.table_create --wait-timeout":                                "Local bounded read-back deadline in seconds; never sent to create_table.",
+	"aitable.field_create --wait":                                        "Local read-back capability; never sent to create_fields.",
+	"aitable.field_create --wait-timeout":                                "Local bounded read-back deadline in seconds; never sent to create_fields.",
+	"oa.create_process_template --from-document":                         "Local absolute JSON document path expanded into the complete create_process_template request; not a direct RPC property.",
+	"oa.update_process_template --from-document":                         "Local absolute JSON document path expanded into the complete update_process_template request; not a direct RPC property.",
 	"aitable.field_create --ai-config":                                   "Conditional aggregate wrapper: --ai-config is only consumed when --fields is absent and --name/--type select the single-field shorthand; the CLI then builds fields[0].aiConfig, so this flag has no unconditional one-to-one RPC property.",
 	"aitable.field_create --config":                                      "Conditional aggregate wrapper: --config is only consumed when --fields is absent and --name/--type select the single-field shorthand; the CLI then builds fields[0].config (and may merge --options), so this flag has no unconditional one-to-one RPC property.",
 	"aitable.field_create --name":                                        "Conditional aggregate wrapper: --name is ignored when --fields is supplied and otherwise becomes fields[0].fieldName only together with --type; it is not an unconditional direct create_fields parameter.",
@@ -64,6 +71,7 @@ var reviewedSchemaParameterMappingExclusions = map[string]string{
 	"aitable.form_update --view-id":                                      "Reviewed unpinned adapter: aitable.form_update has no singular pinned interface_ref; --view-id is a CLI wrapper input and does not publish a direct interface property.",
 	"aitable.query_records --all":                                        "local auto-pagination control; never sent to query_records",
 	"aitable.query_records --page-limit":                                 "local auto-pagination loop limit; never sent to query_records",
+	"aitable.query_records --view-id":                                    "local view→filters/sort compilation: the CLI runs a get_views preflight, restricts the view type to a documented allow-list, then compiles the view's filter/sort into filters/sort; the viewId itself is never sent to query_records.",
 	"aitable.record_create_sub --records-file":                           "CLI-local file adapter: reads and decodes the file into create_sub_records.records; the filesystem path is never sent to MCP.",
 	"aitable.chart_delete --reason":                                      "CLI-local audit note carried in invocation context and recorded in params_summary._local.reason; never sent to delete_chart.",
 	"aitable.datasource_create --field-ids":                              "Rejected compatibility flag: the datasource protocol only supports full synchronization; no fieldIds property is sent.",

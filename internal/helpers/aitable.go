@@ -38,6 +38,80 @@ func parseBoolFlag(cmd *cobra.Command, name string) (bool, error) {
 	return v, nil
 }
 
+const aitableFormShareGetResultSchema = `{
+  "type":"object",
+  "description":"表单分享配置的服务端真实状态",
+  "properties":{
+    "baseId":{"type":"string","description":"Base ID"},
+    "tableId":{"type":"string","description":"数据表 ID"},
+    "viewId":{"type":"string","description":"表单视图 ID"},
+    "enabled":{"type":"boolean","description":"分享是否开启"},
+    "status":{"type":"integer","description":"服务端分享状态 code"},
+		"shareFormUuid":{"type":["string","null"],"description":"服务端生成的分享表单 UUID；未创建时为空"},
+    "formCover":{"type":["string","null"],"description":"当前生效的分享卡片封面；旧服务端可能为空"},
+    "formName":{"type":["string","null"],"description":"当前分享表单名称"},
+    "formDesc":{"type":["string","null"],"description":"当前分享表单描述"}
+  },
+  "required":["baseId","tableId","viewId","enabled","status"],
+  "additionalProperties":true
+}`
+
+// Atomic previews omit data.dry_run; Shortcut previews include it. Both are
+// non-executed requests, not server state or evidence of CP synchronization.
+const aitableFormShareDryRunResultSchema = `{
+  "type":"object",
+  "description":"未执行远端调用的 dry-run 请求预览；success 仅表示预览成功，不代表分享配置或 CP 已更新",
+  "properties":{
+    "tool":{"type":"string","description":"原计划调用的 MCP Tool 名称"},
+    "arguments":{"type":"object","description":"原计划发送的参数，不是服务端状态","additionalProperties":true},
+    "executed":{"type":"boolean","const":false,"description":"远端调用未执行，恒为 false"},
+    "dry_run":{"type":"boolean","const":true,"description":"Shortcut 预览附带的 dry-run 标记，原子命令省略"}
+  },
+  "required":["tool","arguments","executed"],
+  "additionalProperties":false
+}`
+
+// AitableFormShareGetResultSpec is shared by the atomic command and its Shortcut alias.
+func AitableFormShareGetResultSpec() *contract.ResultSpec {
+	return &contract.ResultSpec{
+		Outcomes:   []contract.ResultOutcome{contract.ResultOutcomeSuccess, contract.ResultOutcomeFailure},
+		DataSchema: json.RawMessage(`{"oneOf":[` + aitableFormShareGetResultSchema + `,` + aitableFormShareDryRunResultSchema + `]}`),
+	}
+}
+
+// AitableFormShareUpdateResultSpec is shared by the atomic command and its Shortcut alias.
+func AitableFormShareUpdateResultSpec() *contract.ResultSpec {
+	return &contract.ResultSpec{
+		Outcomes: []contract.ResultOutcome{
+			contract.ResultOutcomeSuccess,
+			contract.ResultOutcomePartialFailure,
+			contract.ResultOutcomeFailure,
+		},
+		DataSchema: json.RawMessage(`{"oneOf":[` + aitableFormShareUpdateResultSchema + `,` + aitableFormSharePartialResultSchema + `,` + aitableFormShareDryRunResultSchema + `]}`),
+	}
+}
+
+const aitableFormShareUpdateResultSchema = `{
+  "type":"object",
+  "description":"已完成服务端回读与 CP 投影校验的表单分享终态；baseId/tableId/viewId 必须逐项与本次请求完全一致，本次显式请求的 enabled/formName/formDesc 必须与响应回读值一致；响应不回读的显式请求字段计入 unverified 且 verified=false",
+  "properties":{
+    "baseId":{"type":"string","description":"Base ID"},
+    "tableId":{"type":"string","description":"数据表 ID"},
+    "viewId":{"type":"string","description":"表单视图 ID"},
+    "enabled":{"type":"boolean","description":"服务端真实分享开关状态"},
+    "status":{"type":"integer","description":"服务端真实分享状态 code"},
+    "shareFormUuid":{"type":["string","null"],"description":"服务端生成的分享表单 UUID；关闭分享时仍保留已有值"},
+    "formCover":{"type":["string","null"],"description":"当前生效的分享卡片封面；旧服务端发布窗口内可能为空"},
+    "cpSynced":{"type":"boolean","const":true,"description":"服务端终态是否已同步到表单视图 CP；成功结果恒为 true"},
+    "formName":{"type":["string","null"],"description":"服务端最终生效的分享表单名称"},
+    "formDesc":{"type":["string","null"],"description":"服务端最终生效的分享表单描述"},
+    "verified":{"type":"boolean","description":"本次显式请求的更新字段是否全部经响应回读逐项验证；存在响应不回读的字段时为 false"},
+    "unverified":{"type":"array","items":{"type":"string"},"description":"本次显式请求但响应不回读、因此无法证明已生效的字段；无此类字段时整个键省略"}
+  },
+  "required":["baseId","tableId","viewId","enabled","status","cpSynced","verified"],
+  "additionalProperties":true
+}`
+
 func parseAitableJSONObjectFlag(name, raw string, requireNonEmpty bool) (map[string]any, error) {
 	var value map[string]any
 	if err := json.Unmarshal([]byte(raw), &value); err != nil || value == nil {
@@ -289,7 +363,8 @@ func validateWorkflowHistoryFlags(cmd *cobra.Command, _ []string) error {
 // recordQueryFetchAll implements --all auto-pagination for record query.
 // It prints only a complete result. A page limit, empty/invalid response,
 // transport failure, or cursor cycle returns a non-zero structured error whose
-// details retain the incomplete records and retry cursor.
+// details retain the incomplete records and retry cursor, unless the server
+// invalidated pagination; invalidated pages must be discarded before restarting.
 func recordQueryFetchAll(toolArgs map[string]any, pageLimit int) error {
 	const serverID = "aitable"
 
@@ -304,6 +379,7 @@ func recordQueryFetchAll(toolArgs map[string]any, pageLimit int) error {
 	if pageLimit == 0 {
 		effectivePageLimit = paging.UnlimitedPageLimit
 	}
+	seenRecords := map[string]bool{}
 	result := paging.FetchAll(ctx, func(ctx context.Context, cursor string) (paging.Page, error) {
 		if cursor == "" {
 			delete(requestArgs, "cursor")
@@ -319,7 +395,33 @@ func recordQueryFetchAll(toolArgs map[string]any, pageLimit int) error {
 		}
 		for _, content := range toolResult.Content {
 			if content.Type == "text" && strings.TrimSpace(content.Text) != "" {
-				return parseRecordQueryPage(content.Text)
+				page, err := parseRecordQueryPage(content.Text)
+				if err != nil {
+					return paging.Page{}, err
+				}
+				for _, raw := range page.Records {
+					// parseRecordQueryPage has already validated every object.
+					record := raw.(map[string]any)
+					rawID, present := record["recordId"]
+					if !present {
+						rawID = record["id"]
+					}
+					id := ""
+					switch v := rawID.(type) {
+					case string:
+						id = v
+					case json.Number:
+						id = v.String()
+					}
+					if id == "" {
+						return paging.Page{}, fmt.Errorf("record item is missing recordId")
+					}
+					if seenRecords[id] {
+						return paging.Page{}, fmt.Errorf("record pagination repeated recordId; completeness cannot be established")
+					}
+					seenRecords[id] = true
+				}
+				return page, nil
 			}
 		}
 		return paging.Page{}, fmt.Errorf("query_records returned no non-empty text content")
@@ -363,6 +465,10 @@ func parseRecordQueryPage(text string) (paging.Page, error) {
 	}
 	if response == nil {
 		return paging.Page{}, fmt.Errorf("query_records returned null instead of an object")
+	}
+	// HTTP 200 仍可能携带业务错误；必须先分类，不能将错误信封当成空末页。
+	if err := ClassifyMCPResponseText(text); err != nil {
+		return paging.Page{}, err
 	}
 	if explicitEmptyRecordQueryPage(response) {
 		return paging.Page{Records: []any{}}, nil
@@ -474,6 +580,15 @@ func parseOptionalNonNegativeInt(value any) (*int, error) {
 }
 
 func recordQueryIncompleteError(result paging.Result, pageLimit int) error {
+	if recovery := recordQueryCursorError(result.Err); recovery != nil {
+		// 只保留诊断计数，不提供旧记录和续传 cursor，防止调用方拼接不同查询版本。
+		recovery.Details["page_limit"] = pageLimit
+		recovery.Details["incomplete_result"] = map[string]any{
+			"discardedCount": len(result.Records), "pages": result.Pages,
+			"attempts": result.Attempts, "complete": false, "stopReason": result.StopReason,
+		}
+		return recovery
+	}
 	incomplete := map[string]any{
 		"records":      result.Records,
 		"fetchedCount": len(result.Records),
@@ -1143,8 +1258,12 @@ func callAitableToolContext(ctx context.Context, toolName string, args map[strin
 // Unified callers declare concrete result schemas, so a missing data member is
 // an invalid upstream response rather than an acknowledgement-only success.
 func callAitableUnifiedDataContext(ctx context.Context, toolName string, args map[string]any) (any, error) {
+	return callAitableUnifiedDataOnServerContext(ctx, "aitable", toolName, args)
+}
+
+func callAitableUnifiedDataOnServerContext(ctx context.Context, serverID, toolName string, args map[string]any) (any, error) {
 	call := func(callCtx context.Context) (any, error) {
-		return CallMCPToolDataOnServer(callCtx, "aitable", toolName, args)
+		return CallMCPToolDataOnServer(callCtx, serverID, toolName, args)
 	}
 	var (
 		raw any
@@ -1160,11 +1279,11 @@ func callAitableUnifiedDataContext(ctx context.Context, toolName string, args ma
 	}
 	envelope, ok := raw.(map[string]any)
 	if !ok || envelope == nil {
-		return nil, apperrors.NewInternal(fmt.Sprintf("aitable/%s 返回值不是 JSON 对象", toolName))
+		return nil, apperrors.NewInternal(fmt.Sprintf("%s/%s 返回值不是 JSON 对象", serverID, toolName))
 	}
 	data, ok := envelope["data"]
 	if !ok || data == nil {
-		return nil, apperrors.NewInternal(fmt.Sprintf("aitable/%s 返回值缺少非空 data", toolName))
+		return nil, apperrors.NewInternal(fmt.Sprintf("%s/%s 返回值缺少非空 data", serverID, toolName))
 	}
 	return data, nil
 }
@@ -1307,6 +1426,9 @@ func callAitableReadWithRetry[T any](ctx context.Context, toolName string, call 
 		}
 
 		value, err := call(ctx)
+		if toolName == "query_records" {
+			err = RecordQueryRecoveryError(err)
+		}
 		if err == nil {
 			return value, nil
 		}
@@ -1329,6 +1451,25 @@ func callAitableHelperTool(toolName string, args map[string]any) error {
 		return struct{}{}, callMCPToolOnServer(server, toolName, args)
 	})
 	return err
+}
+
+func callAitableHelperResult(cmd *cobra.Command, toolName string, args map[string]any) (output.CommandResult, error) {
+	if result, ok := aitableUnifiedDryRunResult(toolName, args); ok {
+		return result, nil
+	}
+	if toolName == "update_share_form" {
+		raw, err := CallMCPToolDataOnServer(cmd.Context(), "aitable-helper", toolName, args)
+		if err != nil {
+			return nil, err
+		}
+		envelope, _ := raw.(map[string]any)
+		return AitableFormShareUpdateResult(envelope["data"], args), nil
+	}
+	data, err := callAitableUnifiedDataOnServerContext(cmd.Context(), "aitable-helper", toolName, args)
+	if err != nil {
+		return nil, err
+	}
+	return output.Success(data), nil
 }
 
 // 显式白名单避免以名称前缀推断工具副作用，新增工具在审阅前默认不重试。
@@ -1430,6 +1571,24 @@ func requireViewType(actual, attr string, expected []string) error {
 		Message: fmt.Sprintf("view type %q does not support attribute %q (only %v)",
 			actual, attr, expected),
 		Suggestion: fmt.Sprintf("请选择一个 %v 类型的视图 viewId 后重试，或用 view get 查看完整视图配置", expected),
+	}
+}
+
+// AnnotateViewUpdateError 仅在服务端返回 INVALID_UPDATE_VIEW_REQUEST（视图类型与所传配置块
+// 不匹配）时，补充与本地 requireViewType 一致口径的排错建议，避免出现两套说法；其余错误原样
+// 返回，不重试、不改控制流。
+func AnnotateViewUpdateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if aitableServerDiag(err).ServerErrorCode != "INVALID_UPDATE_VIEW_REQUEST" {
+		return err
+	}
+	return &CLIError{
+		Code:       CodeMCPToolError,
+		Message:    err.Error(),
+		ServerCode: "INVALID_UPDATE_VIEW_REQUEST",
+		Suggestion: "视图类型与所传配置块不匹配（kanbanCard / ganttTimebar / galleryCard 仅适用于对应视图类型）；请用 view get 查看完整视图配置，改用与该视图类型匹配的配置块后重试",
 	}
 }
 
@@ -2237,9 +2396,9 @@ func newAitableCommand() *cobra.Command {
 			},
 		},
 		Selection: contract.ProductSelectionDecl{
-			AgentSummary: "管理 AI 表格 Base、应用模式、数据表、字段、记录、记录评论、视图、表单、仪表盘、权限、导入导出与自动化工作流。",
+			AgentSummary: "管理 AI 表格 Base、应用模式、数据表、字段、记录、记录评论、视图、表单、仪表盘、权限、访问密钥、导入导出与自动化工作流。",
 			UseWhen: []string{
-				"需要读取或管理 AI 表格中的结构、数据、记录评论、应用模式、视图、权限、导入导出或工作流时",
+				"需要读取或管理 AI 表格中的结构、数据、记录评论、应用模式、视图、权限、访问密钥、导入导出或工作流时",
 			},
 			AvoidWhen: []string{
 				"目标是在线电子表格单元格读写时用 sheet；普通文档用 doc",
@@ -2249,7 +2408,7 @@ func newAitableCommand() *cobra.Command {
 	root := newGroupCommand(&cobra.Command{
 		Use:   "aitable",
 		Short: "AI 表格操作",
-		Long: `管理钉钉 AI 表格：Base 管理、应用模式、数据表、字段、记录、记录评论、视图、表单、仪表盘、图表、导入导出。
+		Long: `管理钉钉 AI 表格：Base 管理、应用模式、数据表、字段、记录、记录评论、视图、表单、仪表盘、图表、访问密钥、导入导出。
 
 命令结构:
   dws aitable base       [list|search|get|get-primary-doc-id|create|update|delete|copy]  Base 管理
@@ -2270,7 +2429,8 @@ func newAitableCommand() *cobra.Command {
   dws aitable import     [upload|data]                                                  数据导入
   dws aitable attachment [upload|remove]                                                附件管理
   dws aitable template   search                                                         模板搜索
-  dws aitable section    [create|rename|delete|reorder|list-empty|list-nodes|move-node]  文件夹与节点管理`,
+  dws aitable section    [create|rename|delete|reorder|list-empty|list-nodes|move-node]  文件夹与节点管理
+  dws aitable api-key    [create|list|revoke]                                          SQL Sheet 访问密钥管理`,
 		RunE:                       groupRunE,
 		SuggestionsMinimumDistance: 2, // Enable "Did you mean ...?" for typos
 	})
@@ -2332,6 +2492,7 @@ exists=false 时不要猜测 nodeId，可调用 record primary-doc-create 创建
 AI 表格访问地址可按 baseId 拼接为：https://alidocs.dingtalk.com/i/nodes/{baseId}
 
 注意: base list 仅返回最近访问过的 Base，不是全部 Base。
+空 bases 不表示遍历结束；只要 nextCursor 非空（hasMore=true）就应继续翻页。returnedCount 仅统计当前页；不会从 summary 推测已过滤数量。
 新创建或未在钉钉前端打开过的 Base 可能不会出现在此列表中。
 如需按名称查找表格，请优先使用 base search 命令。`,
 		Example: `  dws aitable base list
@@ -2344,7 +2505,7 @@ AI 表格访问地址可按 baseId 拼接为：https://alidocs.dingtalk.com/i/no
 			if v, _ := cmd.Flags().GetString("cursor"); v != "" {
 				toolArgs["cursor"] = v
 			}
-			return callAitableTool("list_bases", toolArgs)
+			return callAitableCompatibleReceipt(cmd.Context(), "list_bases", toolArgs)
 		},
 	}
 	DeclareLeafMetadata(baseListCmd, LeafSpec{
@@ -2470,6 +2631,9 @@ MCP 层会进一步兼容同字段传入的标准节点 URL，并在创建前解
 			if v, _ := cmd.Flags().GetString("folder-id"); v != "" {
 				toolArgs["folderId"] = v
 			}
+			if v, _ := cmd.Flags().GetString("workspace-id"); v != "" {
+				toolArgs["workspaceId"] = v
+			}
 			if v, _ := cmd.Flags().GetString("template-id"); v != "" {
 				toolArgs["templateId"] = v
 			}
@@ -2477,7 +2641,7 @@ MCP 层会进一步兼容同字段传入的标准节点 URL，并在创建前解
 		},
 	}
 	DeclareLeafMetadata(baseCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -2496,6 +2660,7 @@ MCP 层会进一步兼容同字段传入的标准节点 URL，并在创建前解
 			},
 			Parameters: []contract.ParamDecl{
 				{Name: "name", Property: "baseName"},
+				{Name: "workspace-id", Property: "workspaceId"},
 			},
 		},
 	})
@@ -2619,7 +2784,7 @@ MCP 层会进一步兼容同字段传入的标准节点 URL，并在创建前解
 		},
 	}
 	DeclareLeafMetadata(baseCopyCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -2704,7 +2869,7 @@ MCP 层会进一步兼容同字段传入的标准节点 URL，并在创建前解
 --fields 参数说明：
 建表时随附创建的初始字段列表，至少包含 1 个字段，单次最多 15 个。若传空数组 []，系统会自动补一个名为"标题"的 primaryDoc 首列。
 建议在此处定义结构清晰的基础字段（如文本、数字、日期、单选等）；
-复杂字段（关联、流转等）建议建表完成后通过 field create 单独添加。
+复杂字段先核对对应 MCP 配置契约；当前生产 field create 的工具 Schema 只显式列出 config.options，其他配置不能仅凭类型枚举认定可用。
 
 每个字段对象包含：
   fieldName（必填）: 字段名称，长度为 1～150 个 UTF-16 字符
@@ -2743,7 +2908,7 @@ config 结构参考：
   unidirectionalLink/bidirectionalLink: {"linkedTableId":"<tableId>","multiple":true} — 反向关联端由系统自动创建，MCP 对外协议无需额外参数
 
 已知边界：
-  formula 字段在当前服务实例上创建会返回 not supported yet，调用前不要假设可用。
+  formula 字段依赖服务端支持；生产 create_fields 的工具 Schema 尚未显式列出 config.formula，不能据创建回执认定表达式已生效。建表的 config 与单独建字段的 config 契约不同；必须独立读回表达式及计算值。
   关联字段创建对底层主键约束严格；即使已传 linkedTableId，也可能因下游返回"主键不存在不允许创建关联字段"而失败。
 
 示例：
@@ -2767,15 +2932,20 @@ config 结构参考：
 				return err
 			}
 			baseID, _ := mustFlagOrFallback(cmd, "base-id", "base")
-			return callMCPTool("create_table", map[string]any{
+			toolArgs := map[string]any{
 				"baseId":    baseID,
 				"tableName": flagOrFallback(cmd, "name", "table-name"),
 				"fields":    fields,
-			})
+			}
+			if v, _ := cmd.Flags().GetString("description"); v != "" {
+				toolArgs["description"] = v
+			}
+			return callAitableCreateWithWait(cmd, "create_table", toolArgs, fields)
 		},
 	}
+	tableCreateCmd.Long += "\n\n" + aitableCreateWaitHelp
 	DeclareLeafMetadata(tableCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -2794,6 +2964,7 @@ config 结构参考：
 			},
 			Parameters: []contract.ParamDecl{
 				{Name: "name", Property: "tableName"},
+				{Name: "description", Property: "description"},
 			},
 		},
 	})
@@ -2978,15 +3149,17 @@ config 结构参考：
 	fieldCreateCmd := &cobra.Command{
 		Use:   "create",
 		Short: "创建字段",
-		Long: `在已有表格中批量新增字段。适用于建表后补充一批字段，或一次性添加多个关联、流转等复杂类型字段。
+		Long: `在已有表格中批量新增字段。适用于建表后补充基础字段；复杂字段的可用配置受下方 MCP 契约边界限制。
 单次最多创建 15 个字段；若超过该数量，请拆分多次调用。
 允许部分成功，返回结果会逐项说明每个字段是否创建成功；失败项会返回 reason 说明失败原因。
 系统会按数组顺序依次创建，返回结果顺序与入参保持一致，并逐项标明成功/失败状态。
 
 每个字段对象包含：
   fieldName（必填）: 字段名称，长度为 1～150 个 UTF-16 字符
-  type（必填）: 字段类型（参考见 table create --help），新增类型包括 address（行政区域）、filterUp（查找引用）、lookup（关联引用）
-  config（可选）: 字段配置（参考见 table create --help）
+  type（必填）: text|number|singleSelect|multipleSelect|date|currency|user|department|group|progress|rating|checkbox|attachment|url|richText|telephone|email|idCard|barcode|geolocation|address|primaryDoc|formula|filterUp|lookup|unidirectionalLink|bidirectionalLink|creator|lastModifier|createdTime|lastModifiedTime
+  config（可选）: 当前生产 MCP create_fields 的工具 Schema 只显式列出 options，格式 {"options":[{"name":"选项名"}]}，适用于 singleSelect/multipleSelect。
+    公式 config.formula、数字/日期 formatter、关联 linkedTableId 等非 options 配置尚需核对服务端完整契约与发布；CLI 原样透传 config 不代表网关或服务端已支持。不要重复试写或把回执中的 fieldId 当作配置已生效。
+    字段类型枚举不等于当前 MCP 支持该类型的全部配置；table create 使用独立契约。
   aiConfig（可选）: AI 字段配置，传入后表示创建 AI 字段。
     - outputType（必填）: text|select|multiSelect|number|currency|image|video
     - prompt（必填）: [{"type":"text","value":"..."}, {"type":"fieldRef","fieldId":"..."}]
@@ -3074,15 +3247,16 @@ config 结构参考：
 			if err != nil {
 				return err
 			}
-			return callMCPTool("create_fields", map[string]any{
+			return callAitableCreateWithWait(cmd, "create_fields", map[string]any{
 				"baseId":  baseID,
 				"tableId": mustGetFlag(cmd, "table-id"),
 				"fields":  fields,
-			})
+			}, fields)
 		},
 	}
+	fieldCreateCmd.Long += "\n\n" + aitableCreateWaitHelp + "\n未使用 --wait 时，success 表示创建回执，不代表字段已可读；verificationStatus=pending/unknown 需只读核对。"
 	DeclareLeafMetadata(fieldCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -3109,8 +3283,8 @@ config 结构参考：
 	fieldUpdateCmd := &cobra.Command{
 		Use:   "update",
 		Short: "更新字段",
-		Long: `更新指定字段的名称、字段配置或 AI 配置。不可变更字段类型（type 不可修改）。
-newFieldName、config、aiConfig 至少传入一项。
+		Long: `更新指定字段的名称、说明、字段配置或 AI 配置。不可变更字段类型（type 不可修改）。
+newFieldName、description、config、aiConfig 至少传入一项。
 
 注意：更新 singleSelect/multipleSelect 的 options 时，需传入完整列表（含已有选项），
 系统以新列表整体覆盖，不是追加。为避免已有单元格因 option id 变化而丢数据，
@@ -3142,6 +3316,9 @@ newFieldName、config、aiConfig 至少传入一项。
 				}
 				toolArgs["newFieldName"] = v
 			}
+			if cmd.Flags().Changed("description") {
+				toolArgs["description"], _ = cmd.Flags().GetString("description")
+			}
 			if v, _ := cmd.Flags().GetString("config"); v != "" {
 				config, err := parseAitableJSONObjectFlag("config", v, false)
 				if err != nil {
@@ -3156,10 +3333,10 @@ newFieldName、config、aiConfig 至少传入一项。
 				}
 				toolArgs["aiConfig"] = aiConfig
 			}
-			if _, ok := toolArgs["newFieldName"]; !ok {
+			if _, ok := toolArgs["newFieldName"]; !ok && !cmd.Flags().Changed("description") {
 				if _, ok := toolArgs["config"]; !ok {
 					if _, ok := toolArgs["aiConfig"]; !ok {
-						return fmt.Errorf("must specify at least one of --name, --config, --ai-config")
+						return fmt.Errorf("must specify at least one of --name, --description, --config, --ai-config")
 					}
 				}
 			}
@@ -3186,6 +3363,7 @@ newFieldName、config、aiConfig 至少传入一项。
 			},
 			Parameters: []contract.ParamDecl{
 				{Name: "name", Property: "newFieldName"},
+				{Name: "description", Property: "description", InterfaceType: "string"},
 			},
 		},
 	})
@@ -3389,6 +3567,7 @@ newFieldName、config、aiConfig 至少传入一项。
         范围用 not_before+not_after 组合。不要传 view update filter 使用的 relative/exact 日期 Scheme。
 
 分页说明：普通扫描某页恰好返回 limit 条时可能带 nextCursor；用它续页后若查询成功且 records=[]、nextCursor 为空，这是正常末页，不是异常或漏查。成功空页若 nextCursor 非空则继续，nextCursor 为空则正常完成。
+若返回 INVALID_CURSOR 或 CURSOR_SNAPSHOT_CHANGED，必须丢弃旧累计结果和游标，不传 --cursor 从第一页重查；CURSOR_SNAPSHOT_UNAVAILABLE 需先等待服务修复；CURSOR_OFFSET_LIMIT 表示排序 offset 已达上限（100000），须先收窄 --filters（或改用 --record-ids/分段条件）再从第一页重查，直接重查会再次触顶。不会自动重跑整条命令或其中的写入步骤。
 
 --sort 结构：[{"fieldId":"<fieldId>","direction":"asc|desc"}]
   示例：[{"fieldId":"fldPriorityId","direction":"asc"},{"fieldId":"fldDueDateId","direction":"desc"}]
@@ -3405,9 +3584,7 @@ newFieldName、config、aiConfig 至少传入一项。
 				return err
 			}
 			tableID := mustGetFlag(cmd, "table-id")
-			if v, _ := cmd.Flags().GetString("view-id"); v != "" {
-				fmt.Fprintf(os.Stderr, "warning: --view-id is not supported by record query; records are queried by table, not by view. The --view-id flag has been ignored.\n")
-			}
+
 			baseID, err := mustFlagOrFallback(cmd, "base-id", "base")
 			if err != nil {
 				return err
@@ -3423,14 +3600,11 @@ newFieldName、config、aiConfig 至少传入一项。
 				toolArgs["fieldIds"] = parseCSVValues(v)
 			}
 			if v, _ := cmd.Flags().GetString("filters"); v != "" {
-				parsed, err := parseAitableJSONObjectFlag("filters", v, false)
+				parsed, err := aitableprotocol.ParseRecordFilters(v)
 				if err != nil {
-					return err
-				}
-				if err := validateFiltersStructure(parsed, v); err != nil {
 					return apperrors.NewValidation(err.Error())
 				}
-				toolArgs["filters"] = normalizeFilters(parsed)
+				toolArgs["filters"] = parsed
 			}
 			if v, _ := cmd.Flags().GetString("sort"); v != "" {
 				var sortArr []map[string]any
@@ -3466,6 +3640,16 @@ newFieldName、config、aiConfig 至少传入一项。
 				toolArgs["cursor"] = v
 			}
 
+			if cmd.Flags().Changed("view-id") {
+				viewID, _ := cmd.Flags().GetString("view-id")
+				if deps.Caller.DryRun() {
+					return deps.Out.PrintJSON(map[string]any{"dry_run": true, "executed": false, "viewId": viewID, "plan": []string{"get_views: validate exact identity and compile filter/sort", "query_records: apply compiled view defaults"}, "arguments": toolArgs})
+				}
+				toolArgs, err = AITableQueryWithView(cmd.Context(), toolArgs, viewID, false)
+				if err != nil {
+					return err
+				}
+			}
 			// --all: 自动翻页，合并所有页的 records 后统一输出
 			fetchAll, _ := cmd.Flags().GetBool("all")
 			if !fetchAll {
@@ -3499,6 +3683,7 @@ newFieldName、config、aiConfig 至少传入一项。
 				// query→keyword is also in versioned bindings; keep a leaf-local
 				// ParamDecl so the mapping survives binding/hint churn.
 				{Name: "query", Property: "keyword"},
+				{Name: "view-id", Description: "先读 get_views 并转换为 query_records 筛选/排序；不透传 viewId"},
 				{Name: "record-ids", Property: "recordIds", Required: boolPtr(false), InterfaceType: "array"},
 				{Name: "field-ids", Property: "fieldIds", InterfaceType: "array"},
 				{Name: "filters", Property: "filters", InterfaceType: "object"},
@@ -3768,7 +3953,7 @@ MEDIAN、DISTINCT、DISTINCT_RATIO 等服务端统计动作。
 records 为待创建的记录列表 JSON 数组，单次最多 100 条。
 每条记录包含 cells 字段，key 为 fieldId（通过 table get 获取），value 为写入值。
 
-可选 --client-token 必须是 UUID v4。网络超时后重试必须复用同一 token；
+可选 --client-token 必须是 UUID v4。调用前持久化 token；网络超时或回执丢失后禁止自动重放创建，使用原 baseId/tableId/token 调用 +record-write-result 只读对账；
 收到重复 token 错误时停止重试并查询实际写入结果，不要换新 token 盲目重放。
 
 注意：filterUp（查找引用）和 lookup（关联引用）字段为只读字段，不能通过 record create/update 写入值。
@@ -3829,7 +4014,7 @@ CLI 会自动从文件中读取内容作为 --records 的值。这样可以避�
 					if clientToken != "" {
 						toolArgs["clientToken"] = clientToken
 					}
-					return callMCPTool("create_records", toolArgs)
+					return callAitableCompatibleReceipt(cmd.Context(), "create_records", toolArgs)
 				}
 			}
 			recordsStr, err := resolveRecordsFlag(cmd)
@@ -3852,11 +4037,11 @@ CLI 会自动从文件中读取内容作为 --records 的值。这样可以避�
 			if clientToken != "" {
 				toolArgs["clientToken"] = clientToken
 			}
-			return callMCPTool("create_records", toolArgs)
+			return callAitableCompatibleReceipt(cmd.Context(), "create_records", toolArgs)
 		},
 	}
 	DeclareLeafMetadata(recordCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -3884,7 +4069,7 @@ CLI 会自动从文件中读取内容作为 --records 的值。这样可以避�
 		Short: "在父记录下创建子记录",
 		Long: `在指定父记录下批量创建子记录，单次最多 100 条。
 records 的 cells 写入格式与 record create 相同，无需手动写入 hierarchy 字段。
-可选 --client-token 必须是 UUID v4；网络超时后重试必须复用同一 token。`,
+可选 --client-token 必须是 UUID v4；调用前持久化 token，超时后禁止自动重放。当前 +record-write-result 不支持子记录模式；需按已有记录 ID 及父子关系只读核实，不能声称子记录创建完成。`,
 		Example: `  dws aitable record create-sub --base-id BASE_ID --table-id TABLE_ID --parent-record-id recParent --records '[{"cells":{"fldTitle":"子任务"}}]'`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateRequiredFlags(cmd, "table-id", "parent-record-id"); err != nil {
@@ -3933,7 +4118,7 @@ records 的 cells 写入格式与 record create 相同，无需手动写入 hier
 		},
 	}
 	DeclareLeafMetadata(recordCreateSubCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID: "aitable", Name: "record_create_sub", CanonicalPath: "aitable.record_create_sub",
@@ -4355,6 +4540,11 @@ records JSON 结构与 record update 完全一致：[{"recordId": "<可选>", "c
 单次最多 100 条（创建 + 更新合计）。
 cells 写入格式见 record create --help（key 是 fieldId，value 按字段类型）。
 
+可选 --client-token 必须是 UUID v4，仅作用于创建分组，建议发送前生成并持久化。
+超时、回执丢失或收到重复 token 错误时，禁止重放整个 upsert（即使使用同一 token）。
+使用原 Base/Table/clientToken 调用 aitable +record-write-result 对账创建分组，
+并按输入 recordId 独立读回更新分组；unknown 不能证明未写入，不要换新 token 补写。
+
 返回 data: {createdRecordIds: [...], updatedRecordIds: [...]}，分别按链路汇总。
 
 Windows 用户注意：如果 --records JSON 很长，请使用 --records-file 参数指定一个 JSON 文件路径。`,
@@ -4382,15 +4572,24 @@ Windows 用户注意：如果 --records JSON 很长，请使用 --records-file �
 			if len(records) > 100 {
 				return fmt.Errorf("--records 单次最多 100 条，got %d", len(records))
 			}
+			clientToken, _ := cmd.Flags().GetString("client-token")
+			clientToken = strings.TrimSpace(clientToken)
+			if err := aitableprotocol.ValidateClientToken(clientToken); err != nil {
+				return fmt.Errorf("--client-token: %w", err)
+			}
 			baseID, err := mustFlagOrFallback(cmd, "base-id", "base")
 			if err != nil {
 				return err
 			}
-			return callAitableHelperTool("record_upsert", map[string]any{
+			toolArgs := map[string]any{
 				"baseId":  baseID,
 				"tableId": mustGetFlag(cmd, "table-id"),
 				"records": records,
-			})
+			}
+			if clientToken != "" {
+				toolArgs["clientToken"] = clientToken
+			}
+			return callAitableHelperTool("record_upsert", toolArgs)
 		},
 	}
 	DeclareLeafMetadata(recordUpsertCmd, LeafSpec{
@@ -4413,6 +4612,7 @@ Windows 用户注意：如果 --records JSON 很长，请使用 --records-file �
 			},
 			Parameters: []contract.ParamDecl{
 				{Name: "records", Required: boolPtr(true), InterfaceType: "array"},
+				{Name: "client-token", Property: "clientToken"},
 			},
 		},
 	})
@@ -5092,6 +5292,9 @@ fieldId 必须是 primaryDoc 类型的字段。`,
 			if err != nil {
 				return err
 			}
+			if err := validateAitableViewType(mustGetFlag(cmd, "view-type")); err != nil {
+				return err
+			}
 			toolArgs := map[string]any{
 				"baseId":   baseID,
 				"tableId":  mustGetFlag(cmd, "table-id"),
@@ -5124,7 +5327,7 @@ fieldId 必须是 primaryDoc 类型的字段。`,
 		},
 	}
 	DeclareLeafMetadata(viewCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -6081,7 +6284,7 @@ locked 为 true 表示视图已锁定，false 表示未锁定。`,
 		},
 	}
 	DeclareLeafMetadata(viewDuplicateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -6662,8 +6865,8 @@ locked 为 true 表示视图已锁定，false 表示未锁定。`,
 	formShareGetCmd := &cobra.Command{
 		Use:   "get",
 		Short: "获取表单分享配置",
-		Long: `读取指定视图当前的分享表单配置。
-返回 enabled（是否开启）、status、shareFormUuid、formName 等信息。
+		Long: `读取指定视图当前的分享表单配置；该命令只诊断，不修改 CP。
+返回 enabled、status、shareFormUuid、formCover、formName 等服务端真实信息。
 若该视图尚未开启分享表单，enabled=false、status=0。`,
 		Example: `  dws aitable form share get --base-id BASE_ID --table-id TABLE_ID --view-id VIEW_ID`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -6674,15 +6877,20 @@ locked 为 true 表示视图已锁定，false 表示未锁定。`,
 			if err != nil {
 				return err
 			}
-			return callAitableHelperTool("get_share_form_config", map[string]any{
+			result, err := callAitableHelperResult(cmd, "get_share_form_config", map[string]any{
 				"baseId":  baseID,
 				"tableId": mustGetFlag(cmd, "table-id"),
 				"viewId":  mustGetFlag(cmd, "view-id"),
 			})
+			if err != nil {
+				return err
+			}
+			return output.StoreResult(cmd.Context(), result)
 		},
 	}
 	DeclareLeafMetadata(formShareGetCmd, LeafSpec{
-		Safety: aitableSafetyRead(),
+		Safety:        aitableSafetyRead(),
+		OutputRollout: output.RolloutUnifiedActive,
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -6691,14 +6899,15 @@ locked 为 true 表示视图已锁定，false 表示未锁定。`,
 				CLIPath:        "aitable form share get",
 				PrimaryCLIPath: "aitable form share get",
 			},
-			Description: "获取表单分享配置。",
+			Description: "获取表单分享配置及服务端真实 UUID、状态和封面。",
 			Interface:   aitableCompositeInterface("Reviewed unpinned remote adapter: this executable CLI wrapper calls a remote helper that is absent from the pinned MCP metadata snapshot; no single pinned semantically equivalent interface_ref can represent the command."),
 			Selection: contract.SelectionSpec{
-				AgentSummary: "获取表单分享配置。",
-				UseWhen:      []string{"查看表单是否已分享及分享类型时"},
+				AgentSummary: "获取表单分享配置及服务端真实 UUID、状态和封面。",
+				UseWhen:      []string{"查看表单是否已分享，或诊断 shareFormUuid、status、formCover 时"},
 				AvoidWhen:    []string{"更新分享用 form share update"},
 				Examples:     []string{"dws aitable form share get --base-id <BASE_ID> --table-id <TABLE_ID> --view-id <VIEW_ID>"},
 			},
+			Result: AitableFormShareGetResultSpec(),
 		},
 	})
 
@@ -6707,9 +6916,13 @@ locked 为 true 表示视图已锁定，false 表示未锁定。`,
 		Short: "更新分享表单配置",
 		Long: `回答契约：用户仅询问用法时，最终回答必须先给出完整命令；缺少必填 ID 时则给出带明确占位符的完整命令模板，禁止猜测。随后明确说明“未传入的分享配置保持原值”；不得执行目标写操作或声称已经执行。
 发现门禁：即使 Skill 或参考文档已提供完整示例，回答前也必须实际执行一次且仅执行一次目标 leaf 的安全 help/schema 查询；不得仅依据 Skill 或参考文档直接作答。
-第一行已有的必填值必须原样使用，缺少的值保留为 <BASE_ID>、<TABLE_ID>、<VIEW_ID> 等明确占位符；第二行说明需要替换的占位符。只读 help/schema 查询是唯一允许的命令。
+只询问写法时，唯一允许的查询为 dws aitable form share update --help；查询过后不再重复 schema/help。最终只输出两行纯文本，无标题或代码围栏。第一行已有的必填值（包括短 ID）必须原样使用，缺少的值保留为 <BASE_ID>、<TABLE_ID>、<VIEW_ID> 等明确占位符；第二行只有存在占位符时才说明需要替换的占位符。所有 ID 已知时，第二行必须原样为：未传入的分享配置保持原值。本次仅查询 help/schema，未执行写操作。
 部分更新指定视图的分享表单配置，未传入的配置保持原值。
 新建表单首次开启分享且已知表单标题时，应在同一次调用中通过 --form-name 传入标题，避免分享内容缺少名称。
+成功结果来自服务端写后回读，并已校验 CP 投影；读取 shareFormUuid、status、formCover 和 cpSynced，其中 cpSynced=true 才表示分享闭环完成。
+成功结果还会逐项比对本次请求：响应的 baseId/tableId/viewId 必须与请求完全一致，本次显式请求的 enabled/formName/formDesc 必须与响应回读值一致。响应不回读的显式请求字段（如 anonymousSubmit、authData）无法证明已生效，会列入 data.unverified 并使 verified=false；此时不得声称这些字段已生效。
+必需字段缺失、类型异常、cpSynced=false、响应目标或已回读的显式请求值与本次请求不一致时返回 partial_failure（退出码 7）；原始响应保留在 data.succeeded[0].response，该阶段仅表示收到远端回执，失败原因在 data.failed[0].error（execution_started=true）。不得自动重放写操作或当作整体成功；DWS 不自行调用第二个 View 更新命令补偿 CP。get 不返回 cpSynced，不能用 get 回读该字段或确认 CP 已恢复；只能诊断分享配置，CP 未确认时需服务端诊断。
+即使外层仍为 ok=true 或返回结构不符合契约，也不得为再次校验 CP 而执行或建议重发 form share update / +form-share-update（包括稍后传相同配置）；诊断不能新增写入，只保留回执并交由服务端排查。
 除 --base-id、--table-id 和 --view-id 外，至少显式传入一个可更新参数。`,
 		Example: `  dws aitable form share update --base-id BASE_ID --table-id TABLE_ID --view-id VIEW_ID --enabled true --form-name "活动报名"
 	  dws aitable form share update --base-id BASE_ID --table-id TABLE_ID --view-id VIEW_ID --form-name "活动报名" --anonymous-submit true`,
@@ -6780,11 +6993,16 @@ locked 为 true 表示视图已锁定，false 表示未锁定。`,
 					toolArgs[property] = mustGetFlag(cmd, name)
 				}
 			}
-			return callAitableHelperTool("update_share_form", toolArgs)
+			result, err := callAitableHelperResult(cmd, "update_share_form", toolArgs)
+			if err != nil {
+				return err
+			}
+			return output.StoreResult(cmd.Context(), result)
 		},
 	}
 	DeclareLeafMetadata(formShareUpdateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety:        aitableSafetyWrite(),
+		OutputRollout: output.RolloutUnifiedActive,
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -6793,11 +7011,11 @@ locked 为 true 表示视图已锁定，false 表示未锁定。`,
 				CLIPath:        "aitable form share update",
 				PrimaryCLIPath: "aitable form share update",
 			},
-			Description: "部分更新表单分享开关、访问范围、有效期和通知等配置。",
+			Description: "部分更新表单分享配置，并返回经服务端回读和 CP 投影校验的真实终态。",
 			Interface:   aitableCompositeInterface("Reviewed unpinned remote adapter: this executable CLI wrapper calls a remote helper that is absent from the pinned MCP metadata snapshot; no single pinned semantically equivalent interface_ref can represent the command."),
 			Selection: contract.SelectionSpec{
-				AgentSummary: "部分更新表单分享开关、访问范围、有效期和通知等配置。",
-				UseWhen:      []string{"开启、关闭或调整表单分享配置时；新建表单首次开启分享且已知标题时，同一次调用传入 --form-name"},
+				AgentSummary: "部分更新表单分享配置，并返回真实 UUID、状态、封面及 CP 同步结果。",
+				UseWhen:      []string{"开启、关闭或调整表单分享配置时；成功后检查 shareFormUuid、status、formCover、cpSynced，新建表单已知标题时同一次调用传入 --form-name"},
 				AvoidWhen:    []string{"只查询用 share get"},
 				Examples:     []string{"dws aitable form share update --base-id BASE_ID --table-id TABLE_ID --view-id VIEW_ID --enabled true --form-name '活动报名'", "dws aitable form share update --base-id BASE_ID --table-id TABLE_ID --view-id VIEW_ID --form-name '活动报名' --anonymous-submit true"},
 			},
@@ -6820,6 +7038,7 @@ locked 为 true 表示视图已锁定，false 表示未锁定。`,
 				{Name: "reply-notice", Property: "replyNotice", InterfaceType: "boolean"},
 				{Name: "share-uid-list", Property: "shareUidList"},
 			},
+			Result: AitableFormShareUpdateResultSpec(),
 		},
 	})
 
@@ -6939,7 +7158,7 @@ locked 为 true 表示视图已锁定，false 表示未锁定。`,
 		},
 	}
 	DeclareLeafMetadata(formSubmitCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID: "aitable", Name: "form_submit", CanonicalPath: "aitable.form_submit",
@@ -7537,7 +7756,7 @@ valid=false 仍表示 DSL 校验或发布未通过，必须读取 issues 修正�
 		},
 	}
 	DeclareLeafMetadata(dashboardCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -7695,10 +7914,15 @@ layout 数组里每项含图表的新位置（row/col/width/height）。`,
 			if err != nil {
 				return err
 			}
-			return callAitableHelperTool("align_dashboard", map[string]any{
+			toolArgs := map[string]any{
 				"baseId":      baseID,
 				"dashboardId": mustGetFlag(cmd, "dashboard-id"),
-			})
+			}
+			if cmd.Flags().Changed("is-app-mode") {
+				v, _ := cmd.Flags().GetBool("is-app-mode")
+				toolArgs["isAppMode"] = v
+			}
+			return callAitableHelperTool("align_dashboard", toolArgs)
 		},
 	}
 	DeclareLeafMetadata(dashboardArrangeCmd, LeafSpec{
@@ -7718,6 +7942,9 @@ layout 数组里每项含图表的新位置（row/col/width/height）。`,
 				UseWhen:      []string{"需要重排仪表盘内组件位置时"},
 				AvoidWhen:    []string{"改仪表盘元数据用 update"},
 				Examples:     []string{"dws aitable dashboard arrange --base-id <base-id> --dashboard-id <dashboard-id>"},
+			},
+			Parameters: []contract.ParamDecl{
+				{Name: "is-app-mode", Property: "isAppMode", InterfaceType: "boolean"},
 			},
 		},
 	})
@@ -7956,7 +8183,7 @@ layout 数组里每项含图表的新位置（row/col/width/height）。`,
 		},
 	}
 	DeclareLeafMetadata(chartCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -8531,7 +8758,7 @@ subRoles[].display.* 提供人类可读标签（authLevelLabel / targetTypeLabel
 		},
 	}
 	DeclareLeafMetadata(advpermRoleCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -8699,6 +8926,9 @@ role-get 自行 merge）。
 				"fileName": mustGetFlag(cmd, "file-name"),
 				"fileSize": fileSize,
 			}
+			if names, _ := cmd.Flags().GetStringSlice("table-names"); len(names) > 0 {
+				toolArgs["tableNames"] = names
+			}
 			return callAitableTool("prepare_import_upload", toolArgs)
 		},
 	}
@@ -8719,6 +8949,9 @@ role-get 自行 merge）。
 				UseWhen:      []string{"导入前需要上传文件凭证时"},
 				AvoidWhen:    []string{"触发导入用 import data；附件字段上传用 attachment upload"},
 				Examples:     []string{"dws aitable import upload --base-id BASE_ID --file-name data.xlsx --file-size 204800"},
+			},
+			Parameters: []contract.ParamDecl{
+				{Name: "table-names", Property: "tableNames", InterfaceType: "array"},
 			},
 		},
 	})
@@ -8833,7 +9066,7 @@ role-get 自行 merge）。
 		},
 	}
 	DeclareLeafMetadata(sectionCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -9140,6 +9373,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	baseGetCmd.Flags().String("base-id", "", "Base 唯一标识。优先使用 base search / base list 返回值 (必填)")
 	baseCreateCmd.Flags().String("name", "", "Base 名称，1-50 字符；会去除首尾空格后校验 (必填)")
 	baseCreateCmd.Flags().String("folder-id", "", "目标父节点的 dentryUuid (知识库节点 ID)，也可传入标准节点 URL，MCP 会在创建前解析出实际生效的节点 ID")
+	baseCreateCmd.Flags().String("workspace-id", "", "目标知识库 ID；与 --folder-id 同时传入时以 folder-id 为准")
 	baseCreateCmd.Flags().String("template-id", "", "创建 Base 模板 ID，默认创建一个空 Base。可通过 template search 获取模板")
 	baseUpdateCmd.Flags().String("base-id", "", "目标 Base ID (必填)")
 	baseUpdateCmd.Flags().String("name", "", "新名称，1-50 字符 (必填)")
@@ -9166,6 +9400,8 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	tableCreateCmd.Flags().String("table-name", "", "--name 的别名")
 	_ = tableCreateCmd.Flags().MarkHidden("table-name")
 	tableCreateCmd.Flags().String("fields", "[]", "建表时随附创建的初始字段 JSON 数组，至少 1 个，单次最多 15 个。若传空数组 []，系统会自动补一个名为'标题'的 primaryDoc 首列")
+	tableCreateCmd.Flags().String("description", "", "数据表的备注说明，可选")
+	declareAitableCreateWaitFlags(tableCreateCmd)
 	tableUpdateCmd.Flags().String("base-id", "", "所属 Base ID（用于定位目标表）(必填)")
 	tableUpdateCmd.Flags().String("table-id", "", "目标 Table ID（通过 base get 获取）(必填)")
 	tableUpdateCmd.Flags().String("name", "", "新表名。不能包含 / \\ ? * [ ] : 等特殊字符；与 --description / --record-name-key 三选一")
@@ -9217,12 +9453,13 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	fieldGetCmd.Flags().String("table-id", "", "Table ID（可通过 base get 获取）(必填)")
 	fieldGetCmd.Flags().String("field-ids", "", "待获取详情的字段 ID 列表（通过 table get 获取），逗号分隔；建议只传真正需要展开完整配置的字段，单次最多 10 个；不传则返回全部字段。建议优先显式传入，以控制返回体大小，避免上下文突增")
 	fieldCreateCmd.Flags().String("base-id", "", "Base ID（通过 base list 获取）(必填)")
+	declareAitableCreateWaitFlags(fieldCreateCmd)
 	fieldCreateCmd.Flags().String("table-id", "", "Table ID（通过 base get 获取）(必填)")
 	fieldCreateCmd.Flags().String("fields", "", "待新增字段列表 JSON 数组，至少包含 1 个字段，单次最多 15 个。系统会按数组顺序依次创建，返回结果顺序与入参保持一致，并逐项标明成功/失败状态。若是单个字段可直接使用 --name/--type/--config")
 	fieldCreateCmd.Flags().String("name", "", "要创建的单字段名称（与 --type 配合使用，替代 --fields）")
 	fieldCreateCmd.Flags().String("field-name", "", "--name 的别名（兼容 LLM 常见误用）")
 	_ = fieldCreateCmd.Flags().MarkHidden("field-name")
-	fieldCreateCmd.Flags().String("type", "", "要创建的单字段类型（需要配合 --name，参考 table create 的内置类型）")
+	fieldCreateCmd.Flags().String("type", "", "单字段类型（配合 --name）：text|number|singleSelect|multipleSelect|date|currency|user|department|group|progress|rating|checkbox|attachment|url|richText|telephone|email|idCard|barcode|geolocation|address|primaryDoc|formula|filterUp|lookup|unidirectionalLink|bidirectionalLink|creator|lastModifier|createdTime|lastModifiedTime；类型枚举不保证配置可创建，生产 MCP Schema 当前只显式列出 config.options")
 	fieldCreateCmd.Flags().String("field-type", "", "--type 的别名（兼容 LLM 常见误用）")
 	_ = fieldCreateCmd.Flags().MarkHidden("field-type")
 	fieldCreateCmd.Flags().String("config", "", "单字段的额外配置 JSON（如 options，配合 --name/--type 使用）")
@@ -9233,6 +9470,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	fieldUpdateCmd.Flags().String("table-id", "", "Table ID（可通过 base get 获取）(必填)")
 	fieldUpdateCmd.Flags().String("field-id", "", "Field ID（可通过 table get 获取）(必填)")
 	fieldUpdateCmd.Flags().String("name", "", "更新后的字段名称，1～150 个 UTF-16 字符。不修改名称时省略")
+	fieldUpdateCmd.Flags().String("description", "", "字段说明；显式空字符串清除说明，省略保留")
 	fieldUpdateCmd.Flags().String("config", "", "更新后的字段配置 JSON，结构与 field create 的 config 完全一致。不修改配置时省略。更新 singleSelect/multipleSelect 的 options 时需传入完整列表，系统以新列表整体覆盖；已有选项应回传原 id，新增选项无需传 id")
 	fieldUpdateCmd.Flags().String("ai-config", "", "更新后的 AI 配置 JSON，不修改 AI 配置时省略（与 MCP update_field.aiConfig 对齐）")
 	fieldDeleteCmd.Flags().String("base-id", "", "Base ID（通过 base list 获取）(必填)")
@@ -9291,7 +9529,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	recordQueryCmd.Flags().String("table-id", "", "Table ID（通过 base get 获取）(必填)")
 	recordQueryCmd.Flags().String("record-ids", "", "指定要获取的记录 ID 列表，逗号分隔，单次最多 100 个。传入时按 ID 返回，忽略 filters 和 sort。适用于已知 recordId（如关联字段中的 linkedRecordIds）时的精准取数")
 	recordQueryCmd.Flags().String("field-ids", "", "指定要返回的字段 ID 列表，逗号分隔。省略则返回所有字段。建议在字段较多时按需传入，可显著减少响应体积；单次最多 100 个")
-	recordQueryCmd.Flags().String("filters", "", "结构化过滤条件 JSON，不传则返回全部记录（受 limit 限制）")
+	recordQueryCmd.Flags().String("filters", "", aitableprotocol.RecordFiltersHelp+"；不传则返回全部记录（受 limit 限制）")
 	recordQueryCmd.Flags().String("sort", "", "排序条件 JSON 数组，按数组顺序依次生效")
 	recordQueryCmd.Flags().String("query", "", "全文关键词。将对整表内容做文本匹配搜索，并返回符合条件的记录")
 	recordQueryCmd.Flags().String("keyword", "", "全文关键词 (--query 的别名)")
@@ -9302,8 +9540,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	recordQueryCmd.Flags().String("cursor", "", "分页游标，首次查询不传；普通扫描满 limit 后可能出现成功空续页，records 为空不是错误，仍以本页 nextCursor 是否为空判断继续或完成；nextCursor 为空表示已取完全部记录")
 	recordQueryCmd.Flags().Bool("all", false, "自动翻页获取完整记录集；达到 --page-limit 且仍有更多页时返回非零结构化错误，不把不完整结果作为成功输出")
 	recordQueryCmd.Flags().Int("page-limit", 50, "自动翻页最大页数（仅 --all 时生效）。默认 50 页（约 5000 条）；设为 0 表示显式不限页数；超限时错误详情保留已取记录和续传 cursor")
-	recordQueryCmd.Flags().String("view-id", "", "视图 ID（record query 不支持按视图过滤，此参数会被忽略并给出提示）")
-	_ = recordQueryCmd.Flags().MarkHidden("view-id")
+	recordQueryCmd.Flags().String("view-id", "", "准确视图 ID；读取并转换其筛选/排序，显式 filters/sort 覆盖对应视图配置；与 record-ids 互斥")
 	recordIDsCmd.Flags().String("base-id", "", "Base ID（通过 base list / base search 获取）(必填)")
 	recordIDsCmd.Flags().String("table-id", "", "Table ID（通过 base get 获取）(必填)")
 	recordIDsCmd.Flags().Int("limit", 0, "单页记录 ID 数量，范围 1～100；省略时服务端默认 100")
@@ -9329,7 +9566,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	recordCreateCmd.Flags().String("table-id", "", "Table ID，可通过 base get 获取 (必填)")
 	recordCreateCmd.Flags().String("records", "", "待创建的记录列表 JSON 数组，单次最多 100 条 (必填)")
 	recordCreateCmd.Flags().String("records-file", "", "从文件读取 records JSON（替代 --records，适合 Windows 或超长数据）")
-	recordCreateCmd.Flags().String("client-token", "", "可选 UUID v4 幂等键；超时重试时必须复用同一值")
+	recordCreateCmd.Flags().String("client-token", "", "可选 UUID v4 幂等键；调用前持久化，超时后保留原值并只读对账，禁止自动重放")
 	recordCreateCmd.Flags().String("fields", "", "--records 的别名（兼容 LLM 常见误用）")
 	_ = recordCreateCmd.Flags().MarkHidden("fields")
 	recordCreateCmd.Flags().String("cells", "", "单条记录的 cells JSON 对象（自动构造 --records '[{\"cells\":...}]'）")
@@ -9342,7 +9579,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	recordCreateSubCmd.Flags().String("fields", "", "--records 的兼容别名")
 	_ = recordCreateSubCmd.Flags().MarkHidden("fields")
 	recordCreateSubCmd.Flags().String("view-id", "", "可选视图 ID；指定时从该视图读取 hierarchyConfig")
-	recordCreateSubCmd.Flags().String("client-token", "", "可选 UUID v4 幂等键；超时重试时必须复用同一值")
+	recordCreateSubCmd.Flags().String("client-token", "", "可选 UUID v4 幂等键；调用前持久化，超时后只读核实父子关系，禁止自动重放")
 	recordUpdateCmd.Flags().String("base-id", "", "Base ID，可通过 base list 或 base search 获取 (必填)")
 	recordUpdateCmd.Flags().String("table-id", "", "Table ID，可通过 base get 获取 (必填)")
 	recordUpdateCmd.Flags().String("records", "", "待更新的记录内容列表 JSON 数组，单次最多 100 条 (必填)")
@@ -9384,6 +9621,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	recordUpsertCmd.Flags().String("table-id", "", "Table ID，可通过 base get 获取 (必填)")
 	recordUpsertCmd.Flags().String("records", "", "待 upsert 的记录内容列表 JSON 数组，单次最多 100 条；带 recordId 的走更新，不带的走创建 (必填，可改用 --records-file)")
 	recordUpsertCmd.Flags().String("records-file", "", "从文件读取 records JSON（避免命令行长度限制）；与 --records 互斥，优先级更高")
+	recordUpsertCmd.Flags().String("client-token", "", "可选 UUID v4 幂等键，仅作用于不带 recordId 的创建分组；调用前持久化，超时后只读对账，禁止自动重放")
 	recordUpsertCmd.Flags().String("fields", "", "--records 的别名 (兼容旧用法)")
 	_ = recordUpsertCmd.Flags().MarkHidden("fields")
 
@@ -9766,6 +10004,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	dashboardDeleteCmd.Flags().String("reason", "", "删除原因")
 	dashboardArrangeCmd.Flags().String("base-id", "", "所属 Base ID (必填)")
 	dashboardArrangeCmd.Flags().String("dashboard-id", "", "目标 Dashboard ID (必填)")
+	dashboardArrangeCmd.Flags().Bool("is-app-mode", false, "可选，只读的应用模式上下文；仅在确认目标属于应用模式时传 true，强制按 V2 48 列对齐；不传时按已验证的 schemaVersion 选择列数")
 	dashboardShareGetCmd.Flags().String("base-id", "", "所属 Base ID (必填)")
 	dashboardShareGetCmd.Flags().String("dashboard-id", "", "目标 Dashboard ID (必填)")
 	dashboardShareUpdateCmd.Flags().String("base-id", "", "所属 Base ID (必填)")
@@ -9830,6 +10069,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	importUploadCmd.Flags().String("base-id", "", "Base ID (必填)")
 	importUploadCmd.Flags().String("file-name", "", "文件名，须带扩展名，如 data.xlsx (必填)")
 	importUploadCmd.Flags().Int64("file-size", 0, "文件大小（字节数）(必填)")
+	importUploadCmd.Flags().StringSlice("table-names", nil, "可选，指定要导入的 Sheet 名称列表（逗号分隔）；不传则导入文件内所有 Sheet")
 	importDataCmd.Flags().String("import-id", "", "prepare_import_upload 返回的 importId (必填)")
 	importDataCmd.Flags().String("table-id", "", "目标数据表 ID。传入后数据将作为新行追加到该表中；不传则默认新建表导入")
 	importDataCmd.Flags().Int("timeout", 0, "最长等待时间（秒），默认且推荐使用最大值 30")
@@ -10070,7 +10310,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 		},
 	}
 	DeclareLeafMetadata(datasourceCreateCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -10195,8 +10435,12 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	datasourceUpdateCmd.Flags().String("auto-sync-setting", "", "可选。自动同步频率配置 JSON 字符串，仅在显式设置 --auto=true 时生效；省略时保持原有自动同步频率配置。字段：syncType（必填，hourly/scheduled）、hourlyInterval（syncType=hourly 时必填）、scheduleType（syncType=scheduled 时必填，daily/weekly/monthly）、timeValue（HH:mm）、selectedMonthDays（scheduleType=monthly 时）、selectedWeekdays（scheduleType=weekly 时）、skipNonWorkingDay")
 
 	datasourceSyncCmd := &cobra.Command{
-		Use:     "sync",
-		Short:   "触发数据源表手动同步",
+		Use:   "sync",
+		Short: "触发数据源表手动同步",
+		Long: `对已有数据源表触发一次手动同步（单次最多 5 张），仅触发任务即返回，不等待同步完成。
+每张表独立提交，单表失败不影响其他表，整体仍返回 success；调用方需遍历 tasks[] 按单条 status 判断。
+同步运行中的表返回 failed 状态（errorCode=SYNC_RUNNING），属幂等冲突，应视为稍后重试而非最终失败。
+非数据源表（sync=false）不能用此工具触发同步，会以参数错误返回。`,
 		Example: `  dws aitable datasource sync --base-id BASE_ID --table-ids TBL1,TBL2`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateRequiredFlags(cmd, "table-ids"); err != nil {
@@ -10412,7 +10656,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 		RunE: baseCreateCmd.RunE, // 复用 baseCreateCmd 的执行逻辑
 	}
 	DeclareLeafMetadata(createAliasCmd, LeafSpec{
-		Safety: aitableSafetyWrite(),
+		Safety: aitableSafetyCreate(),
 		Contract: LeafContract{
 			Identity: contract.ToolIdentitySpec{
 				ProductID:      "aitable",
@@ -10431,12 +10675,14 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 			},
 			Parameters: []contract.ParamDecl{
 				{Name: "name", Property: "baseName"},
+				{Name: "workspace-id", Property: "workspaceId"},
 			},
 		},
 	})
 	// 独立注册 flags（不能用 copyFlags 共享指针，cobra 不支持同一 flag 绑多个命令）
 	createAliasCmd.Flags().String("name", "", "Base 名称，1-50 字符；会去除首尾空格后校验 (必填)")
 	createAliasCmd.Flags().String("folder-id", "", "目标父节点的 dentryUuid (知识库节点 ID)，也可传入标准节点 URL，MCP 会在创建前解析出实际生效的节点 ID")
+	createAliasCmd.Flags().String("workspace-id", "", "目标知识库 ID；与 --folder-id 同时传入时以 folder-id 为准")
 	createAliasCmd.Flags().String("template-id", "", "创建 Base 模板 ID，默认创建一个空 Base。可通过 template search 获取模板")
 	root.AddCommand(createAliasCmd)
 
@@ -10473,6 +10719,7 @@ parentSectionId 为空串表示该节点在 Base 根目录下。
 	infoAliasCmd.Flags().String("base-id", "", "Base 唯一标识。优先使用 base search / base list 返回值 (必填)")
 	root.AddCommand(infoAliasCmd)
 	root.AddCommand(newAitablePsqlCommand())
+	root.AddCommand(newAitableAPIKeyCommand())
 	// hint: dws aitable doc search → dws aitable base search
 	root.AddCommand(hintSubCmd("doc", "use: dws aitable base search --query <关键词>"))
 	// NOTE: "create" and "info" are registered as real alias commands above

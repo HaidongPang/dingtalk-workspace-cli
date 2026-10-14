@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/corecmd"
 )
 
 func TestCrossPlatformCoverageWhiteboardInjectedEncodingFailures(t *testing.T) {
@@ -28,7 +30,7 @@ func TestCrossPlatformCoverageWhiteboardInjectedEncodingFailures(t *testing.T) {
 	installWhiteboardTestCaller(t, caller)
 	cmd := newDocWhiteboardCommand()
 	cmd.SetArgs([]string{"insert", "--node", "n", "--yes"})
-	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "模板未通过") {
+	if err := corecmd.ExecuteForTest(cmd); err == nil || !strings.Contains(err.Error(), "模板未通过") {
 		t.Fatalf("err=%v", err)
 	}
 
@@ -45,7 +47,7 @@ func TestCrossPlatformCoverageDocWhiteboardInsertDryRun(t *testing.T) {
 	installWhiteboardTestCaller(t, caller)
 	cmd := newDocWhiteboardCommand()
 	cmd.SetArgs([]string{"insert", "--node", "n"})
-	if err := cmd.Execute(); err != nil {
+	if err := corecmd.ExecuteForTest(cmd); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -72,6 +74,7 @@ func TestCrossPlatformCoverageLoadWhiteboardUpdateFileRejectsInvalidInputs(t *te
 		{name: "nodes missing", content: `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1"}}`},
 		{name: "nodes malformed", content: `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[}}`},
 		{name: "node primitive", content: `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[1]}}`},
+		{name: "shape presentation order", content: `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[{"id":"shape","type":"shape","presentationOrder":0}]}}`},
 		{name: "append empty", content: `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[]}}`},
 		{name: "unknown field", content: `{"unknown":true}`},
 	}
@@ -96,6 +99,11 @@ func TestCrossPlatformCoverageLoadWhiteboardUpdateFileRejectsInvalidInputs(t *te
 		`{"overwrite":true,"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[]}}`))
 	if err != nil || !input.Overwrite || nodes != "[]" {
 		t.Fatalf("input=%#v nodes=%q err=%v", input, nodes, err)
+	}
+	input, nodes, err = loadWhiteboardUpdateFile(writeWhiteboardFixture(t,
+		`{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[{"id":"frame","type":"frame","presentationOrder":0}]}}`))
+	if err != nil || input.Overwrite || !strings.Contains(nodes, `"presentationOrder":0`) {
+		t.Fatalf("frame input=%#v nodes=%q err=%v", input, nodes, err)
 	}
 }
 
@@ -198,7 +206,7 @@ func TestCrossPlatformCoverageWhiteboardCommandValidationBranches(t *testing.T) 
 		cmd.PersistentFlags().String("jq", "", "")
 		cmd.PersistentFlags().String("fields", "", "")
 		cmd.SetArgs(args)
-		if err := cmd.Execute(); err == nil {
+		if err := corecmd.ExecuteForTest(cmd); err == nil {
 			t.Fatalf("args %v should fail", args)
 		}
 	}
@@ -210,7 +218,7 @@ func TestCrossPlatformCoverageWhiteboardUpdateOverwriteAndSourceErrors(t *testin
 	cmd := newWhiteboardCommand()
 	cmd.SetArgs([]string{"update", "--node", "n", "--part-id", "p", "--source", writeWhiteboardFixture(t,
 		`{"overwrite":true,"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[]}}`), "--yes"})
-	if err := cmd.Execute(); err != nil {
+	if err := corecmd.ExecuteForTest(cmd); err != nil {
 		t.Fatal(err)
 	}
 	if caller.calls[0].args["mode"] != "overwrite" {
@@ -219,7 +227,7 @@ func TestCrossPlatformCoverageWhiteboardUpdateOverwriteAndSourceErrors(t *testin
 
 	cmd = newWhiteboardCommand()
 	cmd.SetArgs([]string{"update", "--node", "n", "--part-id", "p", "--source", filepath.Join(t.TempDir(), "missing")})
-	if err := cmd.Execute(); err == nil {
+	if err := corecmd.ExecuteForTest(cmd); err == nil {
 		t.Fatal("expected source error")
 	}
 }
@@ -235,7 +243,7 @@ func TestCrossPlatformCoverageDocMediaUploadValidationAndSuccess(t *testing.T) {
 	file := writeWhiteboardFixture(t, "svg")
 	cmd := newDocCommand()
 	cmd.SetArgs([]string{"media", "upload", "--node", "n", "--file", file, "--name", "icon", "--mime-type", "image/custom", "--yes"})
-	if err := cmd.Execute(); err != nil {
+	if err := corecmd.ExecuteForTest(cmd); err != nil {
 		t.Fatal(err)
 	}
 	if caller.calls[0].args["fileName"] != "icon.json" || caller.calls[0].args["mimeType"] != "image/custom" {
@@ -249,7 +257,7 @@ func TestCrossPlatformCoverageDocMediaUploadValidationAndSuccess(t *testing.T) {
 	} {
 		cmd = newDocCommand()
 		cmd.SetArgs(args)
-		if err := cmd.Execute(); err == nil {
+		if err := corecmd.ExecuteForTest(cmd); err == nil {
 			t.Fatalf("args %v should fail", args)
 		}
 	}
@@ -262,7 +270,7 @@ func TestCrossPlatformCoverageDocMediaUploadRemainingBranches(t *testing.T) {
 	installWhiteboardTestCaller(t, caller)
 	cmd := newDocCommand()
 	cmd.SetArgs([]string{"media", "upload", "--node", "n", "--file", file})
-	if err := cmd.Execute(); err != nil {
+	if err := corecmd.ExecuteForTest(cmd); err != nil {
 		t.Fatal(err)
 	}
 
@@ -280,7 +288,7 @@ func TestCrossPlatformCoverageDocMediaUploadRemainingBranches(t *testing.T) {
 			installWhiteboardTestCaller(t, test.caller)
 			cmd := newDocCommand()
 			cmd.SetArgs([]string{"media", "upload", "--node", "n", "--file", file, "--yes"})
-			if err := cmd.Execute(); err == nil {
+			if err := corecmd.ExecuteForTest(cmd); err == nil {
 				t.Fatal("expected upload error")
 			}
 		})
@@ -297,7 +305,7 @@ func TestCrossPlatformCoverageDocWhiteboardInsertCallerError(t *testing.T) {
 	installWhiteboardTestCaller(t, caller)
 	cmd := newDocWhiteboardCommand()
 	cmd.SetArgs([]string{"insert", "--node", "n", "--yes"})
-	if err := cmd.Execute(); err == nil {
+	if err := corecmd.ExecuteForTest(cmd); err == nil {
 		t.Fatal("expected insert error")
 	}
 }

@@ -77,7 +77,7 @@ func runWhiteboardCoverageOutput(t *testing.T, declaration shortcut.Shortcut, ca
 	service.AddCommand(leaf)
 	root.AddCommand(service)
 	root.SetArgs(append([]string{"whiteboard", declaration.Command}, args...))
-	if err := root.Execute(); err != nil {
+	if err := corecmd.ExecuteForTest(root); err != nil {
 		return nil, err
 	}
 	_, _, err := output.EmitStoredResult(leaf)
@@ -422,19 +422,20 @@ func TestCrossPlatformCoverageWhiteboardQueryRejectsFalseSuccessAndMalformedNode
 
 func TestCrossPlatformCoverageWhiteboardSourceValidationFailsClosed(t *testing.T) {
 	for name, source := range map[string]string{
-		"empty":             "",
-		"invalid json":      "{",
-		"trailing json":     `{} {}`,
-		"missing source":    `{}`,
-		"unknown top field": `{"extra":true}`,
-		"wrong schema":      `{"source":{"schemaVersion":"2.0","catalogVersion":"dml-v1","nodes":[]}}`,
-		"wrong catalog":     `{"source":{"schemaVersion":"1.0","catalogVersion":"v2","nodes":[]}}`,
-		"missing nodes":     `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1"}}`,
-		"nodes wrong type":  `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":{}}}`,
-		"append empty":      `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[]}}`,
-		"bad node":          `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[1]}}`,
-		"missing node id":   `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[{"type":"text"}]}}`,
-		"duplicate node id": `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[{"id":"same","type":"text"},{"id":"same","type":"shape"}]}}`,
+		"empty":                    "",
+		"invalid json":             "{",
+		"trailing json":            `{} {}`,
+		"missing source":           `{}`,
+		"unknown top field":        `{"extra":true}`,
+		"wrong schema":             `{"source":{"schemaVersion":"2.0","catalogVersion":"dml-v1","nodes":[]}}`,
+		"wrong catalog":            `{"source":{"schemaVersion":"1.0","catalogVersion":"v2","nodes":[]}}`,
+		"missing nodes":            `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1"}}`,
+		"nodes wrong type":         `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":{}}}`,
+		"append empty":             `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[]}}`,
+		"bad node":                 `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[1]}}`,
+		"missing node id":          `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[{"type":"text"}]}}`,
+		"duplicate node id":        `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[{"id":"same","type":"text"},{"id":"same","type":"shape"}]}}`,
+		"shape presentation order": `{"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[{"id":"shape","type":"shape","presentationOrder":0}]}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseWhiteboardSource(source); err == nil {
@@ -446,6 +447,7 @@ func TestCrossPlatformCoverageWhiteboardSourceValidationFailsClosed(t *testing.T
 	for _, source := range []string{
 		`{"overwrite":true,"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[]}}`,
 		`{"overwrite":false,"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[{"id":"n1","type":"text"}]}}`,
+		`{"overwrite":false,"source":{"schemaVersion":"1.0","catalogVersion":"dml-v1","nodes":[{"id":"frame","type":"frame","presentationOrder":0}]}}`,
 	} {
 		if _, err := parseWhiteboardSource(source); err != nil {
 			t.Fatalf("valid source rejected: %v", err)
@@ -616,7 +618,7 @@ func TestCrossPlatformCoverageWhiteboardReadbackNormalizesRequestScopedReference
 }
 
 func TestCrossPlatformCoverageWhiteboardPublicContractsStayStrictAndUnified(t *testing.T) {
-	for _, declaration := range []shortcut.Shortcut{Query, Update} {
+	for _, declaration := range []shortcut.Shortcut{Query, Diff, Update} {
 		if declaration.Contract.Empty() || declaration.Contract.Result == nil {
 			t.Errorf("%s missing Contract.Result", declaration.Command)
 		}
@@ -1261,5 +1263,60 @@ func TestCrossPlatformCoverageWhiteboardSourceAndDirectVerificationRemainingMatr
 	}
 	if err := verifyWhiteboardUpdate(expected, overwriteCountMismatch, map[string]string{"request": "real"}); err == nil {
 		t.Fatal("overwrite count mismatch returned success")
+	}
+}
+
+func TestCrossPlatformCoverageWhiteboardQueryWithoutViewEcho(t *testing.T) {
+	for _, tc := range []struct {
+		name, view string
+		mutate     func(map[string]any)
+		wantError  bool
+	}{
+		{name: "all inline snapshot", view: "all"},
+		{name: "page inline snapshot", view: "page"},
+		{name: "summary only", view: "summary", mutate: func(v map[string]any) { delete(v, "resultJson") }},
+		{name: "wrong echoed view", view: "all", mutate: func(v map[string]any) { v["view"] = "page" }, wantError: true},
+		{name: "null echo", view: "all", mutate: func(v map[string]any) { v["view"] = nil }, wantError: true},
+		{name: "blank echo", view: "all", mutate: func(v map[string]any) { v["view"] = " " }, wantError: true},
+		{name: "wrong target", view: "all", mutate: func(v map[string]any) { v["nodeId"] = "other" }, wantError: true},
+		{name: "missing revision", view: "all", mutate: func(v map[string]any) { delete(v, "revision") }, wantError: true},
+		{name: "incomplete snapshot", view: "all", mutate: func(v map[string]any) { v["resultSummary"].(map[string]any)["nodeCount"] = 2 }, wantError: true},
+		{name: "download without echo", view: "all", mutate: func(v map[string]any) {
+			delete(v, "resultJson")
+			v["resultDownloadUrl"] = "https://example.test/result"
+		}, wantError: true},
+		{name: "summary with full payload", view: "summary", wantError: true},
+		{name: "summary incomplete", view: "summary", mutate: func(v map[string]any) {
+			delete(v, "resultJson")
+			delete(v["resultSummary"].(map[string]any), "nodeCount")
+		}, wantError: true},
+		{name: "wrong page", view: "page", mutate: func(v map[string]any) {
+			v["resultJson"] = strings.ReplaceAll(v["resultJson"].(string), "page-1", "other-page")
+		}, wantError: true},
+		{name: "wrong page with matching echo", view: "page", mutate: func(v map[string]any) {
+			v["view"] = "page"
+			v["resultJson"] = strings.ReplaceAll(v["resultJson"].(string), "page-1", "other-page")
+		}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var response map[string]any
+			if err := json.Unmarshal([]byte(validStandaloneWhiteboardQueryResponse("wb", tc.view, 2, `[{"id":"n","type":"text"}]`)), &response); err != nil {
+				t.Fatal(err)
+			}
+			delete(response, "view")
+			if tc.mutate != nil {
+				tc.mutate(response)
+			}
+			got, err := projectStandaloneWhiteboardQuery(response, map[string]any{"nodeId": "wb", "view": tc.view, "pageId": "page-1"})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("result=%#v err=%v", got, err)
+			}
+			if err == nil && got["view"] != tc.view {
+				t.Fatalf("view=%v", got["view"])
+			}
+			if _, exists := response["view"]; exists && tc.mutate == nil {
+				t.Fatal("projection mutated response echo")
+			}
+		})
 	}
 }

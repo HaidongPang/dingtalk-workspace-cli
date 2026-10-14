@@ -440,6 +440,11 @@ func waitForProcessExit(t *testing.T, pid int, label string) {
 		if err := exec.Command("kill", "-0", strconv.Itoa(pid)).Run(); err != nil {
 			return
 		}
+		// 容器的 PID 1 可能尚未回收孤儿进程；僵尸已经退出，不能当成仍在运行。
+		if status, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output(); err == nil && strings.HasPrefix(strings.TrimSpace(string(status)), "Z") {
+			t.Logf("%s process %d exited; awaiting container init reaping", label, pid)
+			return
+		}
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("%s process %d is still running after npm wrapper exited", label, pid)
@@ -2483,6 +2488,36 @@ func TestReleaseWorkflowPublicationBypassesSkippedDispatchButStopsOnCancellation
 			}
 		})
 	}
+	release := releaseWorkflowSection(t, workflow, "  release:\n", "\n  verify-darwin-signatures:\n")
+	for _, required := range []string{
+		"needs: [release-contract]",
+		"DWS_REQUIRE_DEVELOPER_ID_SIGNING: ${{ github.repository_owner == 'DingTalk-Real-AI' }}",
+	} {
+		if !strings.Contains(release, required) {
+			t.Errorf("build is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"schema-release-native-proof",
+		"compare-schema-release-proofs",
+		"schema-release-identity",
+		"DWS_SCHEMA_IDENTITY_PROOF",
+		"generate-schema-cache-identity",
+	} {
+		if strings.Contains(release, forbidden) {
+			t.Errorf("build must not produce compile-time Schema identity via %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{
+		"schema-release-native-proof",
+		"compare-schema-release-proofs",
+		"generate-schema-cache-identity",
+		"DWS_SCHEMA_IDENTITY_PROOF",
+	} {
+		if strings.Contains(workflow, forbidden) {
+			t.Errorf("release workflow must not generate Schema identity before shipping: %q", forbidden)
+		}
+	}
 }
 
 func TestReleaseWorkflowDeliveryGateFailsClosed(t *testing.T) {
@@ -2668,6 +2703,34 @@ func TestPostGoreleaserSupportsDeveloperIDSigning(t *testing.T) {
 	}
 }
 
+func TestPostGoreleaserDoesNotEmbedSchemaIdentity(t *testing.T) {
+	t.Parallel()
+
+	scriptPath, err := filepath.Abs(filepath.Join("..", "..", "scripts", "release", "post-goreleaser.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	for _, forbidden := range []string{
+		"SCHEMA_IDENTITY_PROOF",
+		"DWS_SCHEMA_IDENTITY_PROOF",
+		"seal_schema_binary",
+		"schema_package_contract.py",
+		"schemaCacheEdition",
+		"dws-core",
+		"internal/launcher",
+		"package-manifest.json",
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("post-goreleaser.sh must not produce compile-time Schema identity via %q", forbidden)
+		}
+	}
+}
+
 func TestReleaseWorkflowVerifiesRcodesignArchiveChecksum(t *testing.T) {
 	t.Parallel()
 
@@ -2736,6 +2799,12 @@ func TestReleaseWorkflowUsesAppleCodesignBeforePublication(t *testing.T) {
 		"codesign --verify --strict --verbose=4",
 		"runtime-payload materialize",
 		`test "$binary_team" = "$library_team"`,
+		"require_read_only_data",
+		"awk -f scripts/release/extract-data-const-flags.awk",
+		"for flags_entry in $data_const_flags",
+		"SG_READ_ONLY",
+		`"$stage/dws" version >/dev/null`,
+		`arch -x86_64 "$stage/dws" version >/dev/null`,
 		`doctor --json --timeout 2`,
 		`doctor-home`,
 		`doctor.json`,
@@ -3385,6 +3454,7 @@ func TestReleaseBuildsSafeChatBackendByDefaultForEveryPlatform(t *testing.T) {
 	for _, required := range []string{
 		"CGO_ENABLED=1",
 		"GOTOOLCHAIN=go1.25.9",
+		"MACOSX_DEPLOYMENT_TARGET=11.0",
 		"CC_darwin_amd64=o64-clang",
 		"CC_darwin_arm64=oa64-clang",
 		"CC_linux_amd64=/opt/dws-zig/zig cc -target x86_64-linux-gnu.2.17",
@@ -3399,17 +3469,20 @@ func TestReleaseBuildsSafeChatBackendByDefaultForEveryPlatform(t *testing.T) {
 	if strings.Contains(goreleaser, "CGO_ENABLED=0") {
 		t.Fatal("release configuration must not produce CGO-disabled stub binaries")
 	}
+	if !strings.Contains(goreleaser, "GOTOOLCHAIN=go1.26.7") {
+		t.Errorf("SafeChat release build is not pinned to the Go 1.26.7 baseline")
+	}
+	postGoreleaser := read("scripts/release/post-goreleaser.sh")
+	if strings.Contains(postGoreleaser, "CGO_ENABLED=0") {
+		t.Fatal("post-goreleaser must not produce CGO-disabled stub binaries")
+	}
+	crossWrapper := read("scripts/release/run-goreleaser-cross.sh")
+	if !strings.Contains(crossWrapper, `[ "${1:-}" = "--exec" ]`) {
+		t.Fatal("cross-release wrapper must accept --exec so CGO rebuilds can reuse pinned toolchains")
+	}
 
-	windowsCompat := read("third_party/safechat-go-sdk/msvcrt_compat_windows.c")
-	for _, required := range []string{
-		`__asm__("_snprintf")`,
-		`__asm__("_vsnprintf")`,
-		`__asm__("__imp__snprintf")`,
-		`__asm__("__imp__vsnprintf")`,
-	} {
-		if !strings.Contains(windowsCompat, required) {
-			t.Errorf("Windows SafeChat CRT compatibility layer is missing %q", required)
-		}
+	if _, err := os.Stat("third_party/safechat-go-sdk/msvcrt_compat_windows.c"); err == nil {
+		t.Fatal("legacy MSVCRT bridge must stay removed: rebuilt Windows libsafechat archives no longer reference legacy CRT names")
 	}
 
 	defaultBuild := read("scripts/dev/build.sh")
@@ -3422,6 +3495,7 @@ func TestReleaseBuildsSafeChatBackendByDefaultForEveryPlatform(t *testing.T) {
 		"ghcr.io/goreleaser/goreleaser-cross:v1.26.2@sha256:fadba0d4577866eb2588d46ea6b604c73ef45ee55f044acbc17cc49aa435fd04",
 		`GORELEASER_VERSION="2.16.0"`,
 		`ZIG_VERSION="0.15.2"`,
+		`MACOSX_DEPLOYMENT_TARGET=11.0`,
 		`zig_sha="02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"`,
 		`zig_sha="958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f"`,
 		`--volume "$zig_dir:/opt/dws-zig:ro"`,
@@ -3430,7 +3504,9 @@ func TestReleaseBuildsSafeChatBackendByDefaultForEveryPlatform(t *testing.T) {
 		"goreleaser_Linux_${archive_arch}.tar.gz",
 		"archive checksum mismatch",
 		`--platform "linux/$docker_arch"`,
-		"--entrypoint /usr/local/bin/goreleaser",
+		"entrypoint=/usr/local/bin/goreleaser",
+		"entrypoint=/usr/bin/env",
+		`--entrypoint "$entrypoint"`,
 	} {
 		if !strings.Contains(wrapper, required) {
 			t.Errorf("pinned cross-release wrapper is missing %q", required)

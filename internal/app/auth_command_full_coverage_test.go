@@ -17,6 +17,7 @@ import (
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/i18n"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/keychain"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/pat"
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/testseam"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/edition"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -454,17 +455,14 @@ func TestCrossPlatformCoverageAuthCoverageContactEnrichment(t *testing.T) {
 	if err := enrichAuthLoginProfileFromContact(ctx, "cfg", multiOrg, multiOrgData); err != nil || multiOrgData.UserID != "target-user" || multiOrgData.CorpName != "Target Corp" {
 		t.Fatalf("multi-org contact selection = %#v, %v", multiOrgData, err)
 	}
-	if _, ok := contactProfileIdentityFromJSON(
+	if _, ok := authpkg.ContactProfileIdentityFromJSON(
 		[]byte(`{"result":[{"orgEmployeeModel":{"corpId":"other-a","userid":"user-a"}},{"orgEmployeeModel":{"corpId":"other-b","userid":"user-b"}}]}`),
 		"ding",
 	); ok {
 		t.Fatal("multiple nonmatching organizations must not select an arbitrary contact identity")
 	}
-	if _, ok := contactProfileIdentityFromToolResult(nil); ok {
+	if _, ok := authpkg.ContactProfileIdentityFromToolResult(nil); ok {
 		t.Fatal("nil result should not parse")
-	}
-	if got := firstNonEmptyString(" ", " value ", "later"); got != "value" {
-		t.Fatalf("first non-empty = %q", got)
 	}
 }
 
@@ -1102,7 +1100,7 @@ func TestCrossPlatformCoverageAuthCoverageStatusAndLogout(t *testing.T) {
 		return nil, keychain.NewUnavailableError("read", errors.New("status"))
 	}
 	edition.Override(&edition.Hooks{})
-	if out, err := runStatus("table"); err != nil || !strings.Contains(out, "未登录") {
+	if out, err := runStatus("table"); err != nil || !strings.Contains(out, "无法判断") {
 		t.Fatalf("status error = %q, %v", out, err)
 	}
 	if out, err := runStatus("json"); err != nil || !strings.Contains(out, `"authenticated": false`) {
@@ -1438,15 +1436,15 @@ func TestCrossPlatformCoverageAuthCoveragePortableExchangeAndReset(t *testing.T)
 		t.Fatal("missing code should fail")
 	}
 	_ = exchange.Flags().Set("code", "code")
-	authOAuthExchange = func(*authpkg.OAuthProvider, context.Context, string, string) (*authpkg.TokenData, error) {
+	testseam.Swap(t, &authExternalExchange, func(context.Context, string, authpkg.ExternalExchangeRequest) (*authpkg.TokenData, error) {
 		return nil, errors.New("exchange")
-	}
+	})
 	if err := exchange.RunE(exchange, nil); err == nil {
 		t.Fatal("exchange error should propagate")
 	}
-	authOAuthExchange = func(*authpkg.OAuthProvider, context.Context, string, string) (*authpkg.TokenData, error) {
-		return &authpkg.TokenData{CorpID: "ding", ExpiresAt: time.Now().Add(time.Hour)}, nil
-	}
+	testseam.Swap(t, &authExternalExchange, func(context.Context, string, authpkg.ExternalExchangeRequest) (*authpkg.TokenData, error) {
+		return &authpkg.TokenData{CorpID: "ding", UserID: "user", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	})
 	_ = exchange.Flags().Set("uid", " user ")
 	if err := exchange.RunE(exchange, nil); err != nil || !strings.Contains(out.String(), "ding") {
 		t.Fatalf("exchange = %q, %v", out.String(), err)

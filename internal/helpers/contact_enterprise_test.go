@@ -6,12 +6,15 @@ package helpers
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/corecmd"
+	apperrors "github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/errors"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/edition"
 )
 
@@ -65,7 +68,7 @@ func runContactEnterpriseCommand(t *testing.T, args ...string) (*contactEnterpri
 	// 补注册以等价用户显式确认，使 user_required 命令的确认路径可被覆盖。
 	cmd.PersistentFlags().Bool("yes", false, "")
 	cmd.SetArgs(args)
-	return caller, cmd.Execute()
+	return caller, corecmd.ExecuteForTest(cmd)
 }
 
 func TestCrossPlatformCoverageContactEnterpriseCommandsExposeExpectedFlags(t *testing.T) {
@@ -141,6 +144,38 @@ func TestCrossPlatformCoverageContactEnterpriseCommandsMapMCPArguments(t *testin
 			},
 		},
 		{
+			name:     "get user id by dingtalk id",
+			args:     []string{"user", "get-by-dingtalk-id", "--id", "zhangsan"},
+			toolName: "get_user_id_by_dingtalk_id",
+			wantArgs: map[string]any{
+				"dingtalk_id": "zhangsan",
+			},
+		},
+		{
+			name:     "get user id by dingtalk id alias",
+			args:     []string{"user", "search-dingtalk", "--dingtalk-id", " zhangsan "},
+			toolName: "get_user_id_by_dingtalk_id",
+			wantArgs: map[string]any{
+				"dingtalk_id": "zhangsan",
+			},
+		},
+		{
+			name:     "get user id by open dingtalk id",
+			args:     []string{"user", "get-by-open-dingtalk-id", "--id", "open-dt-zhangsan"},
+			toolName: "get_user_id_by_open_dingtalk_id",
+			wantArgs: map[string]any{
+				"open_dingtalk_id": "open-dt-zhangsan",
+			},
+		},
+		{
+			name:     "get user id by open dingtalk id alias",
+			args:     []string{"user", "get-user-by-open-dingtalk-id", "--open-dingtalk-id", " open-dt-zhangsan "},
+			toolName: "get_user_id_by_open_dingtalk_id",
+			wantArgs: map[string]any{
+				"open_dingtalk_id": "open-dt-zhangsan",
+			},
+		},
+		{
 			name:     "create enterprise account with explicit false send flag",
 			args:     []string{"account", "create", "--org-user-name", "王五", "--login-id", "wangwu001", "--send-pwd-via-sms=false"},
 			toolName: "exclusive_account_create",
@@ -181,6 +216,40 @@ func TestCrossPlatformCoverageContactUserInviteRejectsInvalidDepartmentsJSON(t *
 	)
 	if err == nil || !strings.Contains(err.Error(), "--depts JSON 解析失败") {
 		t.Fatalf("error = %v, want departments JSON validation", err)
+	}
+	if len(caller.calls) != 0 {
+		t.Fatalf("invalid input made %d remote call(s)", len(caller.calls))
+	}
+}
+
+func TestCrossPlatformCoverageContactGetByDingtalkIdRejectsBlankID(t *testing.T) {
+	caller, err := runContactEnterpriseCommand(t,
+		"user", "get-by-dingtalk-id",
+		"--id", "   ",
+	)
+	if err == nil || !strings.Contains(err.Error(), "不能为空") {
+		t.Fatalf("error = %v, want blank id validation", err)
+	}
+	var appErr *apperrors.Error
+	if !errors.As(err, &appErr) || appErr.Category != apperrors.CategoryValidation {
+		t.Fatalf("error = %T %v, want validation error", err, err)
+	}
+	if len(caller.calls) != 0 {
+		t.Fatalf("invalid input made %d remote call(s)", len(caller.calls))
+	}
+}
+
+func TestCrossPlatformCoverageContactGetByOpenDingtalkIdRejectsBlankID(t *testing.T) {
+	caller, err := runContactEnterpriseCommand(t,
+		"user", "get-by-open-dingtalk-id",
+		"--id", "   ",
+	)
+	if err == nil || !strings.Contains(err.Error(), "不能为空") {
+		t.Fatalf("error = %v, want blank id validation", err)
+	}
+	var appErr *apperrors.Error
+	if !errors.As(err, &appErr) || appErr.Category != apperrors.CategoryValidation {
+		t.Fatalf("error = %T %v, want validation error", err, err)
 	}
 	if len(caller.calls) != 0 {
 		t.Fatalf("invalid input made %d remote call(s)", len(caller.calls))

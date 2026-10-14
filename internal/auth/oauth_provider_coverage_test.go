@@ -19,7 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/i18n"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/keychain"
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/testseam"
 )
 
 type oauthLoginFixture struct {
@@ -47,6 +49,31 @@ type oauthHTTPResult struct {
 }
 
 const oauthTestWaitTimeout = 5 * time.Second
+
+// 用实际输出通知测试，避免依赖繁忙 race Runner 的调度速度。
+type oauthApprovalOutput struct {
+	mu      sync.Mutex
+	buffer  bytes.Buffer
+	once    sync.Once
+	pending chan struct{}
+}
+
+func (w *oauthApprovalOutput) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.buffer.Write(p)
+	text := w.buffer.String()
+	if strings.Contains(text, "Waiting for admin approval") || strings.Contains(text, "等待管理员审批中") {
+		w.once.Do(func() { close(w.pending) })
+	}
+	return n, err
+}
+
+func (w *oauthApprovalOutput) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buffer.String()
+}
 
 func isolateOAuthPersistence(t *testing.T) {
 	t.Helper()
@@ -422,33 +449,41 @@ func TestCrossPlatformCoverageOAuthLoginEarlyAndListenerEdges(t *testing.T) {
 }
 
 func TestCrossPlatformCoverageOAuthLoginTimeoutAndServerError(t *testing.T) {
-	oldTimeout := oauthLoginTimeout
-	oldListen := oauthListen
-	t.Cleanup(func() {
-		oauthLoginTimeout = oldTimeout
-		oauthListen = oldListen
-	})
-	oauthLoginTimeout = time.Millisecond
-	f := newOAuthLoginFixture(t, func(int32) CLIAuthStatus {
-		return CLIAuthStatus{Success: true, Result: &CLIAuthResult{CLIAuthEnabled: true}}
-	})
-	close(f.exchangeRelease)
-	close(f.statusRelease)
-	if _, err := f.provider.Login(context.Background(), true); err == nil || !strings.Contains(strings.ToLower(err.Error()), "timeout") {
-		t.Fatalf("login timeout = %v", err)
-	}
+	// Language and OAuth seams are process-global; keep locale cases sequential.
+	for _, locale := range []struct {
+		lang        string
+		wantTimeout string
+	}{
+		{"zh", "授权超时（5分钟），请重试"},
+		{"en", "Authorization timeout (5 minutes), please retry"},
+	} {
+		t.Run(locale.lang, func(t *testing.T) {
+			previousLang := i18n.Lang()
+			t.Cleanup(func() { i18n.SetLang(previousLang) })
+			i18n.SetLang(locale.lang)
+			testseam.Swap(t, &oauthLoginTimeout, time.Millisecond)
+			f := newOAuthLoginFixture(t, func(int32) CLIAuthStatus {
+				return CLIAuthStatus{Success: true, Result: &CLIAuthResult{CLIAuthEnabled: true}}
+			})
+			close(f.exchangeRelease)
+			close(f.statusRelease)
+			if _, err := f.provider.Login(context.Background(), true); err == nil || err.Error() != locale.wantTimeout {
+				t.Fatalf("login timeout = %v, want %q", err, locale.wantTimeout)
+			}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	oauthLoginTimeout = time.Second
-	oauthListen = func(string, string) (net.Listener, error) { return listener, nil }
-	if _, err := f.provider.Login(context.Background(), true); err == nil || !strings.Contains(err.Error(), "callback server") {
-		t.Fatalf("callback server failure = %v", err)
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := listener.Close(); err != nil {
+				t.Fatal(err)
+			}
+			testseam.Swap(t, &oauthLoginTimeout, time.Second)
+			testseam.Swap(t, &oauthListen, func(string, string) (net.Listener, error) { return listener, nil })
+			if _, err := f.provider.Login(context.Background(), true); err == nil || !strings.Contains(err.Error(), "callback server") {
+				t.Fatalf("callback server failure = %v", err)
+			}
+		})
 	}
 }
 
@@ -1018,8 +1053,8 @@ func TestCrossPlatformCoverageOAuthCallbackRemainingEdges(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		f := newOAuthLoginFixture(t, func(int32) CLIAuthStatus { return CLIAuthStatus{} })
-		var output bytes.Buffer
-		f.provider.Output = &output
+		output := &oauthApprovalOutput{pending: make(chan struct{})}
+		f.provider.Output = output
 		done := startOAuthLogin(t, ctx, f)
 		finishExchange(t, f, done, "apply")
 		if _, body := httpGetBody(t, f.callbackBase+"/api/sendApply?adminStaffId=admin"); !strings.Contains(body, "true") {
@@ -1034,7 +1069,7 @@ func TestCrossPlatformCoverageOAuthCallbackRemainingEdges(t *testing.T) {
 		if _, body := httpGetBody(t, f.callbackBase+CallbackPath); !strings.Contains(body, "访问权限申请中") {
 			t.Fatalf("cached pending no-code callback = %q", body)
 		}
-		time.Sleep(20 * time.Millisecond)
+		waitOAuthSignal(t, output.pending, done, "approval-pending terminal output")
 		cancel()
 		if result := awaitOAuthLogin(t, done); !errors.Is(result.err, context.Canceled) {
 			t.Fatalf("canceled apply login = %v", result.err)
@@ -1057,13 +1092,13 @@ func TestCrossPlatformCoverageOAuthCallbackRemainingEdges(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		f := newOAuthLoginFixture(t, func(int32) CLIAuthStatus { return CLIAuthStatus{} })
-		var output bytes.Buffer
-		f.provider.Output = &output
+		output := &oauthApprovalOutput{pending: make(chan struct{})}
+		f.provider.Output = output
 		done := startOAuthLogin(t, ctx, f)
 		if body := finishExchange(t, f, done, "hasDwsApply"); !strings.Contains(body, "访问权限申请中") {
 			t.Fatalf("hasDwsApply callback must render the apply-pending page = %q", body)
 		}
-		time.Sleep(20 * time.Millisecond)
+		waitOAuthSignal(t, output.pending, done, "server-side approval-pending terminal output")
 		cancel()
 		if result := awaitOAuthLogin(t, done); !errors.Is(result.err, context.Canceled) {
 			t.Fatalf("canceled hasDwsApply login = %v", result.err)

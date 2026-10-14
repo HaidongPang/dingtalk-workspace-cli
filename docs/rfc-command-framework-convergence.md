@@ -347,6 +347,15 @@ Definition（仅声明；不可编译）
 4. `DeclareLeafMetadata` 传入 Flags/Call/RunE/PostMount 等执行面字段直接 panic，防止半接管；**唯一允许的执行钩子是 `Validate`**，与 `ConfirmSafety` 同在 RunE 层（禁止只挂 PreRunE——直接调 `RunE` / `proxySubCmd` 会跳过 PreRunE）。无独立 Caller 的本地/PAT 命令必须提供 `Validate`，否则会回退成确认抢先。
 5. **长期展望**（非当前硬要求）：更多 Shortcut 可收敛到 mcpbind 形态 1/2，并减少仅为参数装配而存在的 `Execute` 函数体。不得把「必须删除 `Shortcut.Execute` / 必须 mcpbind」写成当前门禁。
 
+参数校验与错误治理的接入约定见
+[统一命令框架参数校验方案](unified-validation-errors-v2.md)。Tier1 与 Tier2 的自定义
+Validate 均由 `corecmd.WithValidation` 构造执行包装；失败不会进入后续确认或业务步骤，
+后续步骤错误不重分类。Tier2 的 deferred caller 继续留在迁移接缝中。
+
+Cobra 接入由装配结束后的 `corecmd.PrepareCommandTree` 一次完成，独立命令亦如此；
+`corecmd.New` 不安装 local/final 双层适配器。app 工厂返回已准备的 root，测试扩展需在
+工厂组装回调内挂载。重复执行沿用 Cobra 有状态语义，独立调用需从工厂重新构造。
+
 #### 5.0.3 与目标 `Contract` 的对应
 
 ```text
@@ -379,6 +388,7 @@ Definition（仅声明；不可编译）
 | | `idempotency` | 评审源（或未来 Contract） | reviewed metadata | 今日非框架声明；不得推断 |
 | | `effect_source` / provenance | 组装派生物 | resolver 写入 `FieldProvenance` | 派生，不手写 |
 | **DryRun** | `preview_kind`, `remote_reads` | 评审源 | `schema_dry_run_capabilities`（正能力声明） | 否；无条目 ≠ 推断「不支持」之外的假能力 |
+| **Wait** | `mode`（`poll`/`event`/`auto`）, `poll_command`, `status_query`, `terminal`（状态→success/failure）, `pending_values`, `event_key`/`match_field`/`resource_query`（event/auto）, `default_timeout_secs` | **声明**（`ContractDecl.Wait` 正能力声明，且必须搭配 ResultInvoke dispatcher + 按模式的 hook：poll↔`WaitPoll`、event↔`WaitEvents`、auto↔两者，构造期配对校验，多余 hook 同样拒绝） | 声明后注册 `--wait`/`--wait-timeout`（框架 flag，不进 toolArgs）；Schema 投影 `wait` 键；auto = 事件优先、流终止/订阅失败回退轮询，一个 deadline 覆盖两阶段并传入 `WaitPoll`/`WaitEvents`（及 `Command().Context()`）；仅 pending 初始结果进入等待，success/failure/partial 原样返回 | 否；未声明命令传 `--wait` = unknown flag。终态失败经统一信封 `error.type: "wait"`（rc=8），超时保持 pending + `meta.operation.timed_out`（rc=0）；轮询间/轮询中/事件消费中超时一律按 pending 关闭 |
 | **Interface** | `interface_mode`, `interface_ref`, `availability`, `reason` | 评审源 | MCP meta + agent metadata 解析 | 否；与 CLI Identity 分离 |
 | **Selection** | `agent_summary`, `use_when`, `avoid_when`, `examples`, `prerequisites`, `tips`, `workflow_refs`, … | 声明（`ContractDecl.Selection` / `ProductDecl`） | `ContractDecl` / `ProductDecl`（`schema_hints/` 已退役） | 可声明；声明载荷**不得携带** `Reviewed`（旧路径专用），携带即组装报错 |
 | **FieldProvenance** | 各字段 winner / candidates | 组装派生物 | Schema 组装器 | 派生；须与 delivered value 一致 |

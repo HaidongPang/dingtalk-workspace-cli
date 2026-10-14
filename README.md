@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Go-1.25+-green?logo=go&logoColor=white" alt="Go 1.25+">
+  <img src="https://img.shields.io/badge/Go-1.26+-green?logo=go&logoColor=white" alt="Go 1.26+">
   <a href="https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="License Apache-2.0"></a>
   <a href="https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/releases"><img src="https://img.shields.io/github/v/release/DingTalk-Real-AI/dingtalk-workspace-cli?color=red&label=release" alt="Latest Release"></a>
   <a href="https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/actions/workflows/ci.yml"><img src="https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -36,6 +36,7 @@
 - [Key Services](#key-services)
 - [Security by Design](#security-by-design)
 - [Reference & Docs](#reference--docs)
+- [OpenHarmony build](#openharmony-build)
 - [Contributing](#contributing)
 
 </details>
@@ -81,7 +82,7 @@ How to pick:
 
 - **Quick install** (one-liner above): non-interactive, installs `multi`.
 - **TTY install** (download then run): `curl -O .../install.sh && bash install.sh` — prompts `1) multi  2) mono` (default 1).
-- **Override via env**: `DWS_SKILL_MODE=mono curl -fsSL ... | sh`.
+- **Override via env**: `curl -fsSL ... | DWS_SKILL_MODE=mono sh`.
 - **Switch later**: `dws skill setup --mode mono` (or `--mode multi`) — review the listed paths and confirm interactively.
 
 </details>
@@ -139,13 +140,37 @@ Static endpoint data is generated from the Wukong baseline and committed in this
 repository under `internal/syncdata`, so source builds do not require a sibling
 data checkout.
 
-> Requires Go 1.25+. On supported macOS, Linux, and Windows amd64/arm64 hosts,
+> Requires Go 1.26+. On supported macOS, Linux, and Windows amd64/arm64 hosts,
 > the default CGO build includes the SafeChat backend without a build tag and
 > therefore requires a working C compiler. Set `CGO_ENABLED=0` only when a stub
 > build is intentional. Use `make package` with Docker to build all six release
 > targets through the repository's pinned cross-compilation toolchain.
 
 </details>
+
+## OpenHarmony build
+
+The repository supports an `openharmony/arm64` build with a Go 1.26.7
+OpenHarmony toolchain. Every beta and stable release builds, self-signs,
+verifies, and publishes `dws-openharmony-arm64.tar.gz` alongside the six
+platform archives, and the binary has been validated on a HarmonyOS PC.
+
+```bash
+OHOS_GO=/path/to/openharmony-go \
+  DWS_PACKAGE_VERSION=1.2.3 \
+  ./scripts/dev/build-openharmony.sh
+
+# Or create a self-signed package archive (dws-openharmony-arm64.tar.gz):
+OHOS_GO=/path/to/openharmony-go \
+  DWS_PACKAGE_VERSION=1.2.3 \
+  ./scripts/dev/package-openharmony.sh
+```
+
+The build is `CGO_ENABLED=0` and therefore keeps SafeChat unavailable. Runtime
+native payloads are also unsupported on OpenHarmony. The script verifies the
+resulting static AArch64 ELF and its Go build metadata; see
+[`docs/openharmony.md`](docs/openharmony.md) for the complete boundary.
+
 
 ## China mirror
 
@@ -156,7 +181,7 @@ For users in mainland China, the following channels avoid GitHub network issues.
 Repository mirror: `https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli`
 
 ```bash
-DWS_GITEE_REPO=DingTalk-Real-AI/dingtalk-workspace-cli curl -fsSL https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli/raw/main/scripts/install.sh | sh
+curl -fsSL https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli/raw/main/scripts/install.sh | DWS_GITEE_REPO=DingTalk-Real-AI/dingtalk-workspace-cli sh
 ```
 
 > With `DWS_GITEE_REPO` set, the installer resolves the latest version and every release asset (binary, checksums, skills) from the Gitee API instead of GitHub. If it is unset, installation defaults to GitHub.
@@ -172,7 +197,7 @@ npm install -g dingtalk-workspace-cli --registry=https://registry.npmmirror.com
 **3. Skills only (Gitee mirror):**
 
 ```bash
-DWS_GITEE_REPO=DingTalk-Real-AI/dingtalk-workspace-cli curl -fsSL https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli/raw/main/scripts/install-skills.sh | sh
+curl -fsSL https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli/raw/main/scripts/install-skills.sh | DWS_GITEE_REPO=DingTalk-Real-AI/dingtalk-workspace-cli sh
 ```
 
 > With `DWS_GITEE_REPO` set, `install-skills.sh` resolves the version and skills package from Gitee; it also auto-falls back to the Gitee mirror when GitHub is unreachable.
@@ -181,7 +206,7 @@ DWS_GITEE_REPO=DingTalk-Real-AI/dingtalk-workspace-cli curl -fsSL https://gitee.
 
 > Requires **v1.0.7** or later. For earlier versions, please re-run the [install script](#installation) to upgrade.
 
-dws has built-in self-upgrade capability. Updates are pulled directly from [GitHub Releases](https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/releases) with SHA256 integrity verification and automatic backup.
+DWS 默认通过 npm Registry 查询发行版本。独立二进制直接下载发布包、校验完整性和平台文件后自更新，无需安装 npm；npm、pnpm 和 Homebrew 安装交由对应包管理器升级。详见[版本来源与升级方式](docs/upgrading.md)。
 
 ```bash
 dws upgrade                    # interactive upgrade to latest version
@@ -196,7 +221,9 @@ dws upgrade --rollback         # rollback to the previous version
 dws upgrade -y                 # skip confirmation prompt
 ```
 
-By default, `dws upgrade` follows the stable release track. Use `--beta` only when you explicitly want the newest GitHub pre-release build.
+`dws upgrade` 默认选择正式渠道；`--beta` 选择 npm 的 beta 渠道。显式配置的 GitHub 升级来源仍使用原有协议。
+
+`auth status`、`version` 和 `--version` 也会显示版本检查结果；未知命令或参数报错时，发现新版会提示升级。检查不会自动安装软件，详见[版本检查与升级提示](docs/version-checks.md)。
 
 ### Six-channel post-release verification
 
@@ -213,12 +240,12 @@ The verifier uses isolated directories and does not replace the `dws` on the cur
 <details>
 <summary><strong>How it works</strong></summary>
 
-The upgrade process follows a two-phase atomic flow to ensure consistency:
+独立二进制的升级分为准备和替换两阶段：
 
-1. **Prepare** — downloads the platform-specific binary and skill packages to a temporary directory, verifies SHA256 checksums, and extracts/validates all files. If any step fails, the upgrade aborts without modifying the existing installation.
+1. **准备** — 下载 npm 发布包，强制验证包完整性及目标平台归档、技能包的 SHA256，再解压并验证新二进制。验证失败时不替换现有安装。
 2. **Apply** — only after all preparations succeed, the binary is replaced and skills are flattened into the canonical `~/.agents/skills` root. Agents classified by the pinned compatibility registry as supporting the universal root read it directly; other detected Agents receive links to the canonical copy, with a direct-copy fallback when links are unavailable. Older DWS-managed agent-specific copies are backed up and retired so the same Skill is not discovered twice.
 
-A backup of the current version is automatically created before each upgrade. Use `dws upgrade --rollback` to restore the previous version if needed.
+独立二进制升级保留自动备份和 `dws upgrade --rollback`。包管理器安装的回退由对应管理器处理；npm/pnpm 安装不支持 `--skip-skills`，因为发布包的安装脚本会更新技能。Homebrew 捆绑技能，使用 `dws skill setup` 安装到 Agent 目录。
 
 | Flag | Description |
 |------|-------------|
@@ -291,6 +318,22 @@ Credentials are securely persisted after first login (Keychain). Subsequent runs
 
 `dws` can stay logged in to several DingTalk accounts at once, including multiple accounts in the same organization. A profile is uniquely identified by `corpId:userId`; the current profile decides which identity a command runs as.
 
+Business commands automatically check and refresh local OAuth credentials as needed;
+there is no need to run `auth status` before each request. `auth status` retains
+refresh, migration and repair behavior and may wait for the authentication lock.
+For concurrent polling, use `dws auth status --readonly --format json` (optionally with
+`--profile`): it reads a local snapshot without the authentication lock, network
+validation, refresh, migration or credential writes. System Keychain reads can
+still wait. Both modes use the same output fields. A read-only result with a
+non-empty `reason` is inconclusive and must not be treated as a confirmed logout;
+`local_state_requires_repair` signals migration/repair and `local_state_unreadable`
+signals a failed local read. Use `auth status` without `--readonly` with the same
+profile for refresh or repair. Read-only mode never reports a refresh and may
+report an expired access token that normal mode would refresh.
+Concurrent updates may yield an older snapshot or an inconclusive result.
+In both modes, `authenticated` is true when either the access or refresh
+credential is valid; `token_valid` separately describes access-token usability.
+
 ```bash
 dws auth login                              # add or refresh one account
 dws profile list                            # list every logged-in account
@@ -306,7 +349,7 @@ Selectors support `corpId:userId`, `corpId:userName`, `corpName:userId`, and `co
 
 Cross-org reads are orchestrated by the agent rather than a built-in `--all-orgs`: list profiles, group by `corpId`, and use the unique `isOrgCurrent=true` account for each organization. If a multi-account organization has no default, ask the user to choose an account first. Writes default to the current account — confirm both organization and account before cross-org writes.
 
-On macOS, an unreadable registered token slot blocks a new OAuth login rather than risking a mixed Keychain/file-DEK state. If normal terminal commands can still read the login while a sandbox using `DWS_DISABLE_KEYCHAIN=1` cannot, migrate the legacy and profile auth entries without exposing tokens:
+On macOS, transient or unclassified Keychain read failures block a new OAuth login rather than risking a mixed Keychain/file-DEK state. A confirmed missing DEK or ciphertext/DEK mismatch is preserved through authorization and replaced only for the slots targeted by the fresh login. If normal terminal commands can still read the login while a sandbox using `DWS_DISABLE_KEYCHAIN=1` cannot, migrate the legacy and profile auth entries without exposing tokens:
 
 ```bash
 env -u DWS_DISABLE_KEYCHAIN dws auth migrate-keychain --to file-dek --dry-run --format json
@@ -347,6 +390,7 @@ values, and the current file-DEK bundle has no safe DPAPI-to-portable conversion
 dws contact user search --query "engineering"      # search contacts
 dws calendar event list                            # list today's calendar events
 dws doc search --query "quarterly"                 # search DingTalk Docs
+dws whiteboard +query --node "<whiteboard-node-id>" --view summary --format json  # inspect a whiteboard
 dws minutes list mine                              # list AI meeting notes I created
 dws drive list                                     # list DingTalk drive files
 dws todo task create --title "Quarterly report" --executors "<your-userId>"   # create a todo (replace <your-userId>)
@@ -354,6 +398,23 @@ dws todo task list --dry-run                       # preview without executing
 ```
 
 > **Full command list**: [`docs/command-index.md`](./docs/command-index.md) — all commands with descriptions and when-to-use guidance.
+
+### Whiteboards
+
+Use `dws whiteboard` for standalone whiteboards and whiteboards embedded in documents: query content, create / update with OpenNodes, preview changes with `+diff`, render local SVG previews, and manage personal / team templates or use public templates.
+
+```bash
+dws whiteboard --help
+dws whiteboard render --source @whiteboard.json --output ./whiteboard-preview.svg --format json
+dws whiteboard +diff --help
+dws whiteboard template personal list --format json
+dws whiteboard template team list --template-workspace "<workspace-id>" --page-all --format json
+dws whiteboard template public list --query "retrospective" --format json
+```
+
+`whiteboard.json` is an OpenNodes source file. SVG rendering is a local preview; review its fidelity and warnings, then confirm the current preview before creating the whiteboard. Use `+diff` to inspect the proposed update before `+update`. For template `save` / `create` commands, `--dry-run` performs an optional server-side preflight without saving a template or creating a whiteboard.
+
+See the [whiteboard reference](./skills/mono/references/products/whiteboard.md), [Diff guide](./skills/mono/references/products/whiteboard/diff.md), and [SVG preview guide](./skills/mono/references/products/whiteboard/render.md).
 
 ## Using with Agents
 
@@ -739,7 +800,7 @@ dws chat message send-by-bot --robot-code BOT_CODE --group GROUP_ID \
 
 ## DingTalk bot — connect a robot to your local AI
 
-`dws dev connect` bridges a DingTalk robot to a local AI CLI (Claude Code / Codex / opencode / Qoder / Gemini, or any tool via `--agent-cmd`): @-mention the bot in a chat and it answers using your local agent, keeping per-conversation multi-turn memory.
+`dws dev connect` bridges a DingTalk robot to a local AI CLI (Claude Code / Codex / opencode / Qoder / Gemini / [Pi](docs/pi-agent.md), or any tool via `--agent-cmd`): @-mention the bot in a chat and it answers using your local agent, keeping per-conversation multi-turn memory.
 
 ```bash
 dws dev connect --channel auto --unified-app-id <unifiedAppId>
@@ -773,6 +834,7 @@ See [`docs/robot-quickstart.md`](./docs/robot-quickstart.md) for the full 4-step
 | Report | `report` | Create / submit logs, inbox & outbox, templates, statistics |
 | AI Tables | `aitable` | Bases / tables / records / fields / views, permissions & roles, automation, charts & dashboards, import / export |
 | Doc | `doc` | Search / read / write docs, block-level editing, comments, permissions, media, up / download |
+| Whiteboard | `whiteboard` | Standalone / embedded whiteboards: query, create / update, Diff, local SVG previews, personal / team templates |
 | Drive | `drive` | List / search / download, folders, upload, copy / move / rename, permissions |
 | Minutes | `minutes` | AI meeting notes: list, summary / keywords / transcription / todos, mind map, speakers, tags |
 | Mail | `mail` | Mailboxes, KQL search, read / send, drafts, folders, templates, contacts |

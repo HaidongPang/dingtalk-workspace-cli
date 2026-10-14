@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Go-1.25+-green?logo=go&logoColor=white" alt="Go 1.25+">
+  <img src="https://img.shields.io/badge/Go-1.26+-green?logo=go&logoColor=white" alt="Go 1.26+">
   <a href="https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="License Apache-2.0"></a>
   <a href="https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/releases"><img src="https://img.shields.io/github/v/release/DingTalk-Real-AI/dingtalk-workspace-cli?color=red&label=release" alt="Latest Release"></a>
   <a href="https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/actions/workflows/ci.yml"><img src="https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -38,6 +38,7 @@
 - [核心服务](#核心服务)
 - [安全设计](#安全设计)
 - [参考与文档](#参考与文档)
+- [OpenHarmony 构建](#openharmony-构建)
 - [贡献指南](#贡献指南)
 
 </details>
@@ -83,7 +84,7 @@ irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/ma
 
 - **快速安装**（上方一行 curl）：非交互，默认装 `multi`。
 - **TTY 安装**（先下载再执行）：`curl -O .../install.sh && bash install.sh`，会弹出 `1) multi  2) mono` 选项（默认 1）。
-- **环境变量覆盖**：`DWS_SKILL_MODE=mono curl -fsSL ... | sh`。
+- **环境变量覆盖**：`curl -fsSL ... | DWS_SKILL_MODE=mono sh`。
 - **装完之后再切换**：`dws skill setup --mode mono`（或 `--mode multi`），核对列出的路径后交互确认。
 
 </details>
@@ -137,13 +138,34 @@ go build -o dws ./cmd       # 编译到当前目录
 cp dws ~/.local/bin/         # 安装到 PATH
 ```
 
-> 需要 Go 1.25+。在支持的 macOS、Linux、Windows amd64/arm64 平台上，默认
+> 需要 Go 1.26+。在支持的 macOS、Linux、Windows amd64/arm64 平台上，默认
 > CGO 构建无需 build tag 即包含 SafeChat 后端，因此本机构建需要可用的 C 编译器。
 > 只有明确需要 stub 时才设置 `CGO_ENABLED=0`。使用 `make package` 和 Docker
 > 可通过仓库固定的交叉编译工具链构建全部六个平台产物。
 > 静态端点数据由悟空基线生成并提交在本仓库 `internal/syncdata`，源码构建不需要额外 checkout 数据仓库。
 
 </details>
+
+## OpenHarmony 构建
+
+本仓库支持通过 Go 1.26.7 OpenHarmony 工具链构建 `openharmony/arm64` 目标。
+每次 beta 与正式发布都会构建、自签、校验并随六个平台归档一同发布
+`dws-openharmony-arm64.tar.gz`，该二进制已在 HarmonyOS PC 上完成真机验证。
+
+```bash
+OHOS_GO=/path/to/openharmony-go \
+  DWS_PACKAGE_VERSION=1.2.3 \
+  ./scripts/dev/build-openharmony.sh
+
+# 或生成自签名归档包 (dws-openharmony-arm64.tar.gz)：
+OHOS_GO=/path/to/openharmony-go \
+  DWS_PACKAGE_VERSION=1.2.3 \
+  ./scripts/dev/package-openharmony.sh
+```
+
+该构建固定使用 `CGO_ENABLED=0`，因此 SafeChat 不可用；OpenHarmony 也不支持
+runtime 原生 payload。脚本会校验生成的静态 AArch64 ELF 及 Go 构建元数据，
+完整边界请参见 [`docs/openharmony.md`](docs/openharmony.md)。
 
 ## 国内加速安装
 
@@ -154,7 +176,7 @@ cp dws ~/.local/bin/         # 安装到 PATH
 仓库镜像地址：`https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli`
 
 ```bash
-DWS_GITEE_REPO=DingTalk-Real-AI/dingtalk-workspace-cli curl -fsSL https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli/raw/main/scripts/install.sh | sh
+curl -fsSL https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli/raw/main/scripts/install.sh | DWS_GITEE_REPO=DingTalk-Real-AI/dingtalk-workspace-cli sh
 ```
 
 > 设置 `DWS_GITEE_REPO` 后，安装脚本会改从 Gitee API 解析最新版本和各个 release 产物（二进制、校验和、skills 包），而不是走 GitHub。不设置时默认从 GitHub 安装。
@@ -170,7 +192,7 @@ npm install -g dingtalk-workspace-cli --registry=https://registry.npmmirror.com
 **3. 单独安装 Skills（Gitee 镜像）：**
 
 ```bash
-DWS_GITEE_REPO=DingTalk-Real-AI/dingtalk-workspace-cli curl -fsSL https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli/raw/main/scripts/install-skills.sh | sh
+curl -fsSL https://gitee.com/DingTalk-Real-AI/dingtalk-workspace-cli/raw/main/scripts/install-skills.sh | DWS_GITEE_REPO=DingTalk-Real-AI/dingtalk-workspace-cli sh
 ```
 
 > 同样设置 `DWS_GITEE_REPO`，`install-skills.sh` 会从 Gitee 解析版本和 skills 包；GitHub 不可达时也会自动回退到 Gitee 镜像。
@@ -289,6 +311,15 @@ dws auth login --client-id <your-app-key> --client-secret <your-app-secret>
 
 `dws` 可以同时登录多个钉钉账号，同一组织也能保留多个账号。一个 profile 由 `corpId + userId` 唯一确定。
 
+业务命令会检查本地 OAuth token 并按需自动刷新，无需先执行认证状态查询。
+`dws auth status` 保留刷新、迁移和修复能力，可能等待认证锁。
+并发轮询请使用 `dws auth status --readonly --format json`（支持 `--profile`）：只读本地快照，不获取认证锁、不刷新、不迁移或写入凭证；系统 Keychain 读取仍可能等待。
+两种模式返回相同字段，但只读模式不会报告刷新成功，可能返回普通模式会刷新掉的过期 token 状态。
+只读结果的 `reason` 非空时表示无法判断，不能仅凭 `authenticated: false` 当作已确认未登录；`local_state_requires_repair` 表示需要迁移或修复，`local_state_unreadable` 表示读取失败。
+需要刷新或修复时使用相同 profile 运行 `auth status`（不加 `--readonly`）。
+两种模式的 `authenticated` 判断一致：access token 或 refresh token 任一个有效即为已认证；`token_valid` 单独表示 access token 是否可用。
+本地快照不验证服务端状态，并发更新时可能读到旧值或无法确定的结果。
+
 ```bash
 dws auth login                              # 新增或刷新一个账号
 dws profile list                            # 列出全部账号，profile 字段是稳定的 corpId:userId
@@ -304,7 +335,7 @@ dws --profile <corpId:userId> contact user search --query "..." # 单次精确�
 
 跨组织读取由 agent 编排，而非内置 `--all-orgs`：先 `dws profile list`，每个组织使用唯一的 `isOrgCurrent=true` 账号；若多账号组织没有默认账号，先让用户指定账号。写操作默认只在当前账号执行——跨组织写之前先确认目标组织和账号。
 
-macOS 下，如果已登记的 token slot 无法解密，为避免把系统 Keychain 和 file-DEK 写成混合状态，新的 OAuth 登录会直接拒绝。如果普通终端仍能读取登录态、只有设置 `DWS_DISABLE_KEYCHAIN=1` 的沙箱读不到，可在不暴露 token 的情况下迁移 legacy 与各 profile 的认证条目：
+macOS 下，瞬态或未分类的 Keychain 读取失败仍会拒绝新的 OAuth 登录，避免把系统 Keychain 和 file-DEK 写成混合状态。已确认的 DEK 缺失或密文/DEK 不匹配会保留到授权完成，并且只替换本次新登录实际写入的 token slot。如果普通终端仍能读取登录态、只有设置 `DWS_DISABLE_KEYCHAIN=1` 的沙箱读不到，可在不暴露 token 的情况下迁移 legacy 与各 profile 的认证条目：
 
 ```bash
 env -u DWS_DISABLE_KEYCHAIN dws auth migrate-keychain --to file-dek --dry-run --format json
@@ -342,6 +373,7 @@ dws auth status   # 确认 Refresh Token: 有效
 dws contact user search --query "悟空"             # 搜索联系人
 dws calendar event list                            # 查看今天的日程
 dws doc search --query "季度"                      # 搜索钉钉文档
+dws whiteboard +query --node "<白板节点ID>" --view summary --format json  # 查询白板概况
 dws minutes list mine                              # 列出我创建的 AI 听记
 dws drive list                                     # 列出钉盘文件
 dws todo task create --title "季度汇报" --executors "<your-userId>"   # 创建待办（请替换为真实 userId）
@@ -349,6 +381,24 @@ dws todo task list --dry-run                       # 预览操作但不执行
 ```
 
 > **完整命令列表**：[`docs/command-index.md`](./docs/command-index.md) — 全部命令，带描述和使用场景。
+
+
+### 白板
+
+使用 `dws whiteboard` 操作独立白板和文档内嵌白板：查询内容、通过 OpenNodes 创建／更新、使用 `+diff` 预览变更、生成本地 SVG 预览，以及管理个人／团队模板或使用公共模板。
+
+```bash
+dws whiteboard --help
+dws whiteboard render --source @whiteboard.json --output ./whiteboard-preview.svg --format json
+dws whiteboard +diff --help
+dws whiteboard template personal list --format json
+dws whiteboard template team list --template-workspace "<团队空间ID>" --page-all --format json
+dws whiteboard template public list --query "复盘" --format json
+```
+
+`whiteboard.json` 为 OpenNodes 源文件。SVG 是本地预览，需要查看还原程度和警告，并确认当前预览后再创建白板；更新前使用 `+diff` 检查拟写入内容，再执行 `+update`。模板 `save`／`create` 命令的 `--dry-run` 是可选的服务端预检，不实际保存模板或创建白板。
+
+详见[白板参考](./skills/mono/references/products/whiteboard.md)、[Diff 指南](./skills/mono/references/products/whiteboard/diff.md)和 [SVG 预渲染指南](./skills/mono/references/products/whiteboard/render.md)。
 
 ## 在 Agent 中使用
 
@@ -763,6 +813,7 @@ dws dev connect --channel auto --robot-client-id <id> --robot-client-secret <sec
 | 日志 | `report` | 创建 / 提交日志，收发件箱，模版，统计 |
 | AI 表格 | `aitable` | Base / 数据表 / 记录 / 字段 / 视图，权限与角色，自动化，图表与仪表盘，导入导出 |
 | 文档 | `doc` | 搜索 / 读写文档，块级编辑，评论，权限，媒体，上传 / 下载 |
+| 白板 | `whiteboard` | 独立／内嵌白板：查询、创建／更新、Diff、本地 SVG 预渲染、个人／团队模板 |
 | 钉盘 | `drive` | 列表 / 搜索 / 下载，文件夹，上传，复制 / 移动 / 重命名，权限 |
 | AI 听记 | `minutes` | 听记列表、摘要 / 关键词 / 转写 / 待办、思维导图、发言人、标签 |
 | 邮箱 | `mail` | 邮箱、KQL 搜索、读 / 发、草稿、文件夹、模版、联系人 |

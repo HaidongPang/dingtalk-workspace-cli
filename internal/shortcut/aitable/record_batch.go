@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/aitableprotocol"
 	apperrors "github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/errors"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/helpers"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/shortcut"
@@ -99,6 +100,15 @@ func executeRecordUpsertBatches(rt *shortcut.RuntimeContext) error {
 	records, err := parseRecordObjects(rt.Str("records"), false)
 	if err != nil {
 		return err
+	}
+	clientToken := strings.TrimSpace(rt.Str("client-token"))
+	if err := aitableprotocol.ValidateClientToken(clientToken); err != nil {
+		return apperrors.NewValidation("--client-token: " + err.Error())
+	}
+	if clientToken != "" && len(records) > recordBatchSize {
+		return apperrors.NewValidation(
+			fmt.Sprintf("--client-token 仅支持单批最多 %d 条记录；超过 %d 条请拆分后为每批使用不同的 UUID v4", recordBatchSize, recordBatchSize),
+		)
 	}
 	return executeRecordBatches(rt, "record_upsert", "record_upsert", serverHelper, records, verifyUpsertBatch)
 }
@@ -215,29 +225,88 @@ func executeRecordDeleteBatches(rt *shortcut.RuntimeContext) error {
 	return rt.Output(result)
 }
 
-// Only trust an explicit MCP input error with retryable=false. Transport errors
-// and system failures can occur after a write, so they still need verification.
-func isRecordWriteInputRejection(err error) bool {
+type recordWriteFailure struct {
+	Status string `json:"status"`
+	Error  struct {
+		Type      string `json:"type"`
+		Code      string `json:"code"`
+		Retryable *bool  `json:"retryable"`
+		Details   struct {
+			ClientToken      string   `json:"clientToken"`
+			ReconcileTool    string   `json:"reconcileTool"`
+			CreatedRecordIDs []string `json:"createdRecordIds"`
+			UpdatedRecordIDs []string `json:"updatedRecordIds"`
+		} `json:"details"`
+	} `json:"error"`
+}
+
+func decodeRecordWriteFailure(err error) recordWriteFailure {
 	var cliErr *helpers.CLIError
 	var appErr *apperrors.Error
 	var raw string
 	if errors.As(err, &cliErr) && cliErr.Code == helpers.CodeMCPToolError {
 		raw = cliErr.Message
-	} else if errors.As(err, &appErr) && appErr.Reason == "business_error" {
+	} else if errors.As(err, &appErr) && (appErr.Reason == "business_error" || appErr.Reason == "mcp_tool_error") {
 		raw = appErr.Message
 	} else {
-		return false
+		return recordWriteFailure{}
 	}
-	var body struct {
-		Status string `json:"status"`
-		Error  struct {
-			Type      string `json:"type"`
-			Retryable *bool  `json:"retryable"`
-		} `json:"error"`
+	var body recordWriteFailure
+	if json.Unmarshal([]byte(raw), &body) != nil {
+		return recordWriteFailure{}
 	}
-	return json.Unmarshal([]byte(raw), &body) == nil && body.Status == "error" &&
+	return body
+}
+
+func (body recordWriteFailure) needsReconciliation() bool {
+	return body.Status == "error" && (body.Error.Code == "DUPLICATE_CLIENT_TOKEN" ||
+		body.Error.Code == "REQUEST_ID_CONFLICT" ||
+		strings.HasSuffix(body.Error.Code, "_OUTCOME_UNKNOWN") ||
+		body.Error.Details.ReconcileTool == "get_record_write_result")
+}
+
+// A duplicate token rejects this attempt, not the original mutation. Even a
+// USER_ERROR can carry confirmed updates and an unknown creation group.
+func isRecordWriteInputRejection(err error) bool {
+	body := decodeRecordWriteFailure(err)
+	return body.Status == "error" && !body.needsReconciliation() &&
 		(body.Error.Type == "INPUT_ERROR" || body.Error.Type == "USER_ERROR") &&
 		body.Error.Retryable != nil && !*body.Error.Retryable
+}
+
+func recordUpsertReconciliationError(rt *shortcut.RuntimeContext, result compositeResult, step compositeStep, batch []map[string]any, offset int, cause error, failure recordWriteFailure) error {
+	details := failure.Error.Details
+	step.Status = "unknown"
+	// Preserve acknowledgements separately from verification. In particular,
+	// none of these IDs proves that the entire creation group completed.
+	step.Result = map[string]any{"createdRecordIds": details.CreatedRecordIDs, "updatedRecordIds": details.UpdatedRecordIDs}
+	result.CompletedSteps = append(result.CompletedSteps, step)
+	result.Status = "unknown"
+	result.CompletedCount = offset
+	result.Verification = map[string]any{"status": "pending", "batchOffset": offset, "unverifiedCount": len(batch)}
+	for _, group := range []struct {
+		name string
+		ids  []string
+	}{{"create", details.CreatedRecordIDs}, {"update", details.UpdatedRecordIDs}} {
+		if len(group.ids) > 0 {
+			result.KnownEffects = append(result.KnownEffects, map[string]any{"group": group.name, "recordIds": group.ids, "status": "acknowledged_not_verified"})
+		}
+	}
+	baseID, tableID := rt.Str("base-id"), rt.Str("table-id")
+	clientToken := strings.TrimSpace(rt.Str("client-token"))
+	if clientToken == "" {
+		clientToken = details.ClientToken
+	}
+	result.Checkpoint = map[string]any{"nextOffset": offset, "batchSize": recordBatchSize, "baseId": baseID, "tableId": tableID}
+	if clientToken != "" && aitableprotocol.ValidateClientToken(clientToken) == nil {
+		result.Checkpoint["clientToken"] = clientToken
+		result.NextCommand = aitableRecoveryCommand("dws", "aitable", "+record-write-result", "--base-id", baseID, "--table-id", tableID, "--client-token", clientToken)
+	}
+	if ids := recordIDs(batch); len(ids) > 0 {
+		result.Checkpoint["updateReadbackCommand"] = aitableRecoveryCommand("dws", "aitable", "+record-query", "--base-id", baseID, "--table-id", tableID, "--record-ids", strings.Join(ids, ","))
+	}
+	result.Warnings = append(result.Warnings, "创建分组结果未知；使用原 token 对账，并独立读回更新分组。禁止重放整个 upsert（包括同一 token）；没有原 token 时不能完成创建对账。")
+	return compositeError(result, cause, false)
 }
 
 func queryExistingRecordIDs(rt *shortcut.RuntimeContext, baseID, tableID string, ids []string) ([]string, error) {
@@ -329,7 +398,22 @@ func executeRecordBatches(
 			wireRecords = append(wireRecords, record)
 		}
 		params := map[string]any{"baseId": baseID, "tableId": tableID, "records": wireRecords}
-		writeData, writeErr := rt.CallMCPWriteDataStrict(product, tool, params)
+		if tool == "record_upsert" {
+			if clientToken := strings.TrimSpace(rt.Str("client-token")); clientToken != "" {
+				params["clientToken"] = clientToken
+			}
+		}
+		var writeData map[string]any
+		var writeErr error
+		var clientToken string
+		if tool == "create_records" {
+			writeData, clientToken, writeErr = createRecordsReconciled(rt, baseID, tableID, wireRecords)
+			if ids := createdRecordIDs(writeData); len(ids) > 0 {
+				result.KnownEffects = append(result.KnownEffects, map[string]any{"tool": tool, "offset": offset, "clientToken": clientToken, "recordIds": ids})
+			}
+		} else {
+			writeData, writeErr = rt.CallMCPWriteDataStrict(product, tool, params)
+		}
 		step := compositeStep{
 			Index: len(result.CompletedSteps) + 1, Name: "write record batch", Tool: tool,
 			Status: "completed", Offset: offset, Count: len(batch), Result: writeData,
@@ -337,6 +421,9 @@ func executeRecordBatches(
 		if writeErr != nil {
 			step.Status = "unknown"
 			step.Error = writeErr.Error()
+		}
+		if failure := decodeRecordWriteFailure(writeErr); tool == "record_upsert" && failure.needsReconciliation() {
+			return recordUpsertReconciliationError(rt, result, step, batch, offset, writeErr, failure)
 		}
 		// A structured input rejection proves this batch was not accepted. Do
 		// not replace it with an unrelated read-back mismatch or suggest retry.
@@ -391,6 +478,12 @@ func executeRecordBatches(
 				result.Warnings = append(result.Warnings, "write response error: "+writeErr.Error())
 			}
 			retryable := !isPendingRecordReadback(verifyErr)
+			if tool == "create_records" {
+				retryable = false
+				result.Checkpoint["clientToken"] = clientToken
+				result.Checkpoint["createdRecordIds"] = createdRecordIDs(writeData)
+				result.NextCommand = aitableRecoveryCommand("dws", "aitable", "+record-write-result", "--base-id", baseID, "--table-id", tableID, "--client-token", clientToken)
+			}
 			if tool == "record_upsert" {
 				for _, record := range batch {
 					if recordID(record) == "" {
@@ -513,17 +606,34 @@ func verifyUpsertBatch(rt *shortcut.RuntimeContext, baseID, tableID string, batc
 }
 
 func queryRecordsByIDs(rt *shortcut.RuntimeContext, baseID, tableID string, ids []string) ([]map[string]any, error) {
-	window, err := queryRecordWindow(rt, map[string]any{
-		"baseId": baseID, "tableId": tableID, "recordIds": ids,
-	}, len(ids))
-	if err != nil {
-		return nil, err
+	return queryRecordsByIDParams(rt, map[string]any{"baseId": baseID, "tableId": tableID}, ids)
+}
+
+func queryRecordsByIDParams(rt *shortcut.RuntimeContext, params map[string]any, ids []string) ([]map[string]any, error) {
+	// The service limits exact-ID responses to one 20-row page and may not
+	// publish continuation for omitted IDs. Partition the IDs themselves;
+	// retrying a cursor with the same 100 IDs cannot prove all rows.
+	result := make([]map[string]any, 0, len(ids))
+	chunkSize := recordQueryServicePageSize
+	if limit, ok := params["limit"].(int); ok && limit > 0 && limit < chunkSize {
+		chunkSize = limit
 	}
-	// Exact-ID verification below compares every requested ID with the returned
-	// records. The service can publish a continuation even after all requested
-	// IDs are present, so hasMore is not evidence that this bounded read-back is
-	// incomplete.
-	return window.Records, nil
+	for offset := 0; offset < len(ids); offset += chunkSize {
+		end := minInt(offset+chunkSize, len(ids))
+		chunk := ids[offset:end]
+		request := cloneAnyMap(params)
+		request["recordIds"] = chunk
+		delete(request, "cursor")
+		window, err := queryRecordWindow(rt, request, len(chunk))
+		if err != nil {
+			return nil, err
+		}
+		if _, err = validateExactRecordQuery(window.Records, chunk); err != nil {
+			return nil, err
+		}
+		result = append(result, window.Records...)
+	}
+	return result, nil
 }
 
 func queryDeletedRecordsByIDs(rt *shortcut.RuntimeContext, baseID, tableID string, ids []string) ([]map[string]any, error) {
